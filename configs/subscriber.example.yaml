@@ -1,0 +1,32 @@
+server:
+  mode: subscriber
+  listen: "0.0.0.0:11436"
+
+node:
+  node_id: rtx4090
+  display_name: "i9-13900K RTX 4090"
+  tags:
+    - cuda
+    - 4090
+    - primary-code
+    - heavy
+
+ollama:
+  url: "http://localhost:11434"
+
+registration:
+  marshal_url: "http://m4-mini.local:11435"
+  interval_seconds: 30
+
+capabilities:
+  auto_detect: true
+  benchmark_on_start: true
+  benchmark_interval_minutes: 1440
+
+limits:
+  max_concurrent_jobs: 2
+  max_context_tokens: 131072
+  allow_model_pull: false
+
+telemetry:
+  local_json_logs: true

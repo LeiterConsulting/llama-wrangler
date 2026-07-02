@@ -1,0 +1,12 @@
+server:
+  mode: subscriber
+  listen: "127.0.0.1:11438"
+node:
+  node_id: rtx4090
+  display_name: "i9-13900K RTX 4090"
+  tags: [cuda, "4090", primary-code, heavy]
+ollama:
+  url: "http://localhost:11434"
+limits:
+  max_concurrent_jobs: 2
+  allow_model_pull: false

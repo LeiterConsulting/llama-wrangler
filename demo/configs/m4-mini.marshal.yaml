@@ -1,0 +1,45 @@
+server:
+  mode: marshal
+  listen: "127.0.0.1:11435"
+
+ollama:
+  url: "http://localhost:11434"
+
+routing:
+  default_model_alias: local-fast
+  default_execution_mode: single
+  allow_fallback: true
+  request_timeout_seconds: 300
+  queue_max_depth: 128
+
+model_aliases:
+  local-fast:
+    strategy: fastest_available
+    candidates: [llama3.1:8b]
+    execution_mode: single
+    affinity: soft
+  local-code:
+    strategy: best_code_node
+    candidates: [qwen2.5-coder:14b, llama3.1:8b]
+    execution_mode: single
+    affinity: soft
+  local-consensus:
+    strategy: consensus
+    candidates: [qwen2.5-coder:14b, llama3.1:8b]
+    execution_mode: consensus
+    min_participants: 2
+    max_participants: 4
+    affinity: task
+
+frontier:
+  enabled: false
+  local_only: true
+
+telemetry:
+  json_logs: true
+  logging_level: metadata_only
+  splunk_hec:
+    enabled: false
+    index: llama_wrangler
+    source: llama-wrangler
+    verify_ssl: true

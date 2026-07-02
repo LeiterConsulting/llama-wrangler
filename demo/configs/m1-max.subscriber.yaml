@@ -1,0 +1,12 @@
+server:
+  mode: subscriber
+  listen: "127.0.0.1:11437"
+node:
+  node_id: m1-max
+  display_name: "M1 Max"
+  tags: [apple-silicon, long-context, code-fallback]
+ollama:
+  url: "http://localhost:11434"
+limits:
+  max_concurrent_jobs: 2
+  allow_model_pull: false

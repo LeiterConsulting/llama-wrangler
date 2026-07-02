@@ -1,0 +1,12 @@
+server:
+  mode: subscriber
+  listen: "127.0.0.1:11436"
+node:
+  node_id: m3-pro
+  display_name: "M3 Pro"
+  tags: [apple-silicon, medium, local-fast]
+ollama:
+  url: "http://localhost:11434"
+limits:
+  max_concurrent_jobs: 1
+  allow_model_pull: false

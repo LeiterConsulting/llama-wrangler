@@ -1,0 +1,323 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/support_bundle.schema.json",
+  "title": "Llama Wrangler Support Bundle",
+  "description": "Sanitized diagnostic export for local troubleshooting. This is not a backup or restore format.",
+  "type": "object",
+  "required": [
+    "generated_at",
+    "version",
+    "bundle_schema",
+    "service",
+    "config",
+    "nodes",
+    "sessions",
+    "queue",
+    "audit",
+    "secret_storage",
+    "privacy"
+  ],
+  "properties": {
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "version": {
+      "type": "string",
+      "description": "Llama Wrangler service version that generated the bundle."
+    },
+    "bundle_schema": {
+      "type": "object",
+      "required": ["name", "version", "json_schema", "documentation", "compatibility"],
+      "properties": {
+        "name": {
+          "const": "llama-wrangler.support-bundle"
+        },
+        "version": {
+          "const": 1
+        },
+        "json_schema": {
+          "const": "schemas/support_bundle.schema.json"
+        },
+        "documentation": {
+          "const": "docs/13_support_bundle_schema.md"
+        },
+        "compatibility": {
+          "const": "additive_backward_compatible"
+        }
+      },
+      "additionalProperties": true
+    },
+    "service": {
+      "type": "object",
+      "required": [
+        "role",
+        "node_id",
+        "setup_complete",
+        "schema_version",
+        "config_version",
+        "migration_history",
+        "created_at",
+        "updated_at",
+        "client_keys",
+        "enrollment_queue"
+      ],
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "setup_complete": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Persisted app-state schema version, not the support-bundle schema version."
+        },
+        "config_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "migration_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "client_keys": {
+          "type": "object",
+          "required": ["count", "active", "revoked"],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "active": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revoked": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": true
+        },
+        "enrollment_queue": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "config": {
+      "type": "object",
+      "description": "Sanitized runtime config with secret fields removed or masked.",
+      "additionalProperties": true
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "queue": {
+      "type": "object",
+      "required": ["max_depth", "active", "waiting", "available", "current", "recent", "priorities", "scheduling"],
+      "properties": {
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "active": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queue_entry"
+          }
+        },
+        "recent": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queue_entry"
+          }
+        },
+        "priorities": {
+          "type": "array",
+          "items": {
+            "enum": ["high", "normal", "low"]
+          }
+        },
+        "scheduling": {
+          "type": "object",
+          "required": ["policy", "weights"],
+          "properties": {
+            "policy": {
+              "enum": ["weighted_priority", "fifo"]
+            },
+            "weights": {
+              "type": "object",
+              "required": ["high", "normal", "low"],
+              "properties": {
+                "high": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "normal": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "low": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "audit": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "secret_storage": {
+      "type": "object",
+      "description": "Secret-storage status metadata only.",
+      "additionalProperties": true
+    },
+    "privacy": {
+      "type": "object",
+      "required": [
+        "prompt_bodies_included",
+        "response_bodies_included",
+        "secrets_included",
+        "redacted_fields"
+      ],
+      "properties": {
+        "prompt_bodies_included": {
+          "const": false
+        },
+        "response_bodies_included": {
+          "const": false
+        },
+        "secrets_included": {
+          "const": false
+        },
+        "redacted_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "contains": {
+            "const": "token"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "queue_entry": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "priority",
+        "status",
+        "stream",
+        "enqueued_at",
+        "queue_depth",
+        "queue_capacity",
+        "retry_allowed"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "priority": {
+          "enum": ["high", "normal", "low"]
+        },
+        "status": {
+          "enum": ["waiting", "active", "completed", "failed", "cancelled", "rejected", "partial"]
+        },
+        "surface": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "stream": {
+          "type": "boolean"
+        },
+        "enqueued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "queue_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queue_capacity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_allowed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

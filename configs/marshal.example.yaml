@@ -1,0 +1,77 @@
+server:
+  mode: marshal
+  listen: "0.0.0.0:11435"
+
+ollama_compat:
+  enabled: true
+
+openai_compat:
+  enabled: true
+
+auth:
+  enabled: true
+  api_keys:
+    - name: local-ide
+      key_env: LLAMA_WRANGLER_IDE_KEY
+
+routing:
+  default_model_alias: local-fast
+  default_execution_mode: single
+  allow_fallback: true
+  request_timeout_seconds: 300
+  queue_max_depth: 128
+  queue_scheduling_policy: weighted_priority
+  queue_priority_weights:
+    high: 3
+    normal: 2
+    low: 1
+
+model_aliases:
+  local-fast:
+    strategy: fastest_available
+    candidates:
+      - gemma4:12b-mlx
+      - llama3.1:8b
+
+  local-code:
+    strategy: best_code_node
+    candidates:
+      - qwen3-coder:30b
+      - qwen2.5-coder:14b
+
+  local-code-consensus:
+    strategy: consensus_delta
+    candidates:
+      - qwen3-coder:30b
+      - qwen2.5-coder:14b
+    min_participants: 2
+    max_participants: 4
+
+subscribers:
+  - node_id: m3-pro
+    url: "http://m3-pro.local:11436"
+  - node_id: m1-max
+    url: "http://m1-max.local:11436"
+  - node_id: rtx4090
+    url: "http://rtx4090.local:11436"
+
+frontier:
+  enabled: false
+  default_mode: frontier_delta
+  require_approval_for:
+    - source_code
+    - secrets_detected
+    - customer_data
+  budget:
+    daily_limit_usd: 5.00
+    per_request_limit_usd: 0.50
+
+telemetry:
+  json_logs: true
+  splunk_hec:
+    enabled: true
+    url: "https://splunk.localdomain:8088/services/collector"
+    token_env: SPLUNK_HEC_TOKEN
+    index: "llama_wrangler"
+    source: "llama-wrangler"
+    verify_ssl: true

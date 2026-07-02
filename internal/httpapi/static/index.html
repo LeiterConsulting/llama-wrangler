@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Llama Wrangler</title>
+    <link rel="stylesheet" href="/ui/app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside>
+        <div class="brand">Llama Wrangler</div>
+        <button data-view="wizard">Setup</button>
+        <button data-view="dashboard">Dashboard</button>
+        <button data-view="nodes">Nodes</button>
+        <button data-view="models">Models</button>
+        <button data-view="splunk">Splunk</button>
+        <button data-view="ide">IDE</button>
+        <button data-view="audit">Audit</button>
+        <button data-view="settings">Settings</button>
+      </aside>
+      <main>
+        <header>
+          <div>
+            <h1 id="title">Setup</h1>
+            <p id="subtitle">Local-first, UI-guided Ollama fleet routing.</p>
+          </div>
+          <button id="refresh">Refresh</button>
+        </header>
+        <section id="content"></section>
+      </main>
+    </div>
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

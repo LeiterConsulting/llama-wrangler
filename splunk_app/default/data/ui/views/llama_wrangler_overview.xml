@@ -1,0 +1,80 @@
+<form version="1.1" theme="dark">
+  <label>Llama Wrangler Overview</label>
+  <fieldset submitButton="false">
+    <input type="time" token="time_range">
+      <label>Time Range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Total Requests</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_requests` | stats count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Average Latency</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_responses` | stats avg(latency_ms) as avg_latency_ms | eval avg_latency_ms=round(avg_latency_ms,0)</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Frontier Calls</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_index` sourcetype=llama_wrangler:frontier_delta | stats count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Requests by Execution Mode</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_requests` | stats count by execution_mode</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Latency by Node and Model</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_responses` | stats avg(latency_ms) as avg_latency_ms by selected_node resolved_model | eval avg_latency_ms=round(avg_latency_ms,0)</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Node Health</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_health` | stats latest(status) as status latest(memory_available_gb) as memory_available_gb latest(active_jobs) as active_jobs latest(max_jobs) as max_jobs by node_id hostname platform arch</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </table>
+    </panel>
+  </row>
+</form>

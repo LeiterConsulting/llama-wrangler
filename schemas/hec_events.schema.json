@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Llama Wrangler HEC Event",
+  "type": "object",
+  "required": ["timestamp", "event_type", "version"],
+  "properties": {
+    "timestamp": {"type": "string"},
+    "event_type": {"type": "string"},
+    "request_id": {"type": "string"},
+    "trace_id": {"type": "string"},
+    "marshal_node_id": {"type": "string"},
+    "node_id": {"type": "string"},
+    "version": {"type": "string"},
+    "client_name": {"type": "string"},
+    "client_type": {"type": "string"},
+    "model_requested": {"type": "string"},
+    "model_alias": {"type": "string"},
+    "resolved_model": {"type": "string"},
+    "execution_mode": {"type": "string"},
+    "task_type": {"type": "string"},
+    "status": {"type": "string"},
+    "latency_ms": {"type": "number"},
+    "tokens_per_second": {"type": "number"},
+    "frontier_used": {"type": "boolean"},
+    "fallback_used": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}
