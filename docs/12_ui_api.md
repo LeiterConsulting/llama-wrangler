@@ -103,6 +103,29 @@ Preset cards cover:
 
 Preset metadata includes the derived OpenAI-compatible base URL, selected model alias, display fields, and copyable snippet bodies. API keys are represented by `<client-api-key>` placeholders in API responses. The UI may substitute the browser-local one-time generated key for display/copy, but stored client API keys, admin tokens, HEC tokens, prompts, responses, request bodies, and headers must not be returned by preset APIs.
 
+## Node Control Metadata
+
+`GET /wrangler/ui/bootstrap`, `GET /wrangler/nodes`, and support bundles include node control metadata for Phase B planning and UI badges.
+
+Node records can include:
+
+- `control_level`: `managed` or `passive`
+- `trust_level`: `local`, `lan_trusted`, `lan_unverified`, or `external`
+- `capability_source`: `subscriber_reported`, `marshal_observed`, or `manual`
+- `approval_state`: `pending`, `approved`, `rejected`, or `revoked`
+- `health_source`
+- `model_inventory_source`
+- `benchmark_source`
+- `warm_state_supported`
+- `management_supported`
+- `telemetry_level`
+- `last_observed_at`
+- `last_reported_at`
+
+These fields are metadata only. They must not contain enrollment tokens, API keys, HEC tokens, future provider keys, raw headers, prompt bodies, response bodies, request bodies, or payloads.
+
+Current behavior is intentionally conservative: existing local and manually added subscriber records migrate as Managed Node records. Passive Endpoint records are schema-supported and surfaced with limited-control metadata, but the dedicated Add existing Ollama endpoint flow is a later Phase B slice.
+
 ## Inference Proxy Semantics
 
 For OpenAI-compatible and Ollama-compatible inference endpoints, marshal retries fallback nodes only before client-visible output begins.

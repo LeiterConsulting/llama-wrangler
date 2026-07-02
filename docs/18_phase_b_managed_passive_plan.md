@@ -95,12 +95,16 @@ Badges should appear in Nodes first, then routing and operations surfaces when t
 
 ## Acceptance Criteria for the Next Slice
 
-The next implementation slice should:
+Implemented in the initial schema slice:
 
 - add state schema fields and migration coverage for control/trust metadata
 - preserve existing state migrations and config-version behavior
 - keep existing manually added subscribers working as Managed Node candidates or approved managed records, depending on the least disruptive migration
 - add initial UI badges without claiming unavailable controls
+- expose sanitized metadata through bootstrap and support bundles
+
+The next implementation slice should:
+
 - add a Passive Endpoint add form with safe validation and warnings, or explicitly document any deferred part in the ledger
 - add focused tests for migration, API shape, and UI bootstrap metadata
 - verify live `/healthz`, bootstrap, support-bundle privacy, and browser rendering

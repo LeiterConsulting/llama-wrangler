@@ -43,7 +43,7 @@ Version 1 bundles include:
 - `bundle_schema`: support-bundle schema metadata
 - `service`: role, node ID, setup status, app-state schema/config versions, migration history, timestamps, client-key counts, and sanitized enrollment queue
 - `config`: sanitized runtime config
-- `nodes`: sanitized node metadata
+- `nodes`: sanitized node metadata, including additive Managed Node versus Passive Endpoint control/trust metadata when present
 - `sessions`: sanitized session metadata
 - `queue`: metadata-only queue snapshot, including scheduling policy and weights
 - `audit`: metadata-only audit events
@@ -65,6 +65,8 @@ Version 1 support bundles must report:
 ```
 
 Support bundles must not include admin tokens, client API keys, Splunk HEC tokens, provider keys, enrollment token hashes, raw headers, prompt bodies, response bodies, raw request bodies, payload fields, or other secrets.
+
+Node metadata may include `control_level`, `trust_level`, `capability_source`, `approval_state`, source fields, and freshness timestamps. These fields are diagnostic metadata only. They must not include enrollment tokens, API keys, raw headers, prompt bodies, response bodies, request bodies, or payloads.
 
 Downstream tools should treat support bundles as diagnostic metadata, but they should still avoid redistributing bundles without user approval because hostnames, model names, node metadata, timestamps, and operational state can be sensitive in some environments.
 

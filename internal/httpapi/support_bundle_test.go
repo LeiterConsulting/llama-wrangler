@@ -14,6 +14,18 @@ import (
 
 func TestSupportBundleIncludesSchemaConfigAndQueueMetadata(t *testing.T) {
 	server := newIsolatedTestServer(t)
+	if err := server.store.UpsertNode(appstate.Node{
+		NodeID:       "passive-endpoint",
+		DisplayName:  "Passive Endpoint",
+		Role:         "passive",
+		ControlLevel: appstate.ControlLevelPassive,
+		URL:          "http://studio.local:11434",
+		Status:       "unknown",
+		Enabled:      true,
+		Approved:     false,
+	}); err != nil {
+		t.Fatalf("upsert passive endpoint: %v", err)
+	}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/wrangler/support-bundle/export", nil)
@@ -54,6 +66,20 @@ func TestSupportBundleIncludesSchemaConfigAndQueueMetadata(t *testing.T) {
 	}
 	if _, ok := body["config"].(map[string]interface{}); !ok {
 		t.Fatalf("config missing: %#v", body["config"])
+	}
+	nodes, ok := body["nodes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("nodes missing: %#v", body["nodes"])
+	}
+	passive, ok := nodes["passive-endpoint"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("passive endpoint missing from support bundle: %#v", nodes)
+	}
+	if passive["control_level"] != appstate.ControlLevelPassive || passive["trust_level"] != appstate.TrustLevelLANUnverified {
+		t.Fatalf("passive metadata = %#v", passive)
+	}
+	if passive["capability_source"] != appstate.CapabilitySourceMarshalObserved || passive["approval_state"] != appstate.ApprovalStatePending {
+		t.Fatalf("passive source/approval metadata = %#v", passive)
 	}
 	queue, ok := body["queue"].(map[string]interface{})
 	if !ok {

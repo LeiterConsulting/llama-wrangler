@@ -134,6 +134,46 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
+        "properties": {
+          "control_level": {
+            "enum": ["managed", "passive"]
+          },
+          "trust_level": {
+            "enum": ["local", "lan_trusted", "lan_unverified", "external"]
+          },
+          "capability_source": {
+            "enum": ["subscriber_reported", "marshal_observed", "manual"]
+          },
+          "approval_state": {
+            "enum": ["pending", "approved", "rejected", "revoked"]
+          },
+          "health_source": {
+            "type": "string"
+          },
+          "model_inventory_source": {
+            "type": "string"
+          },
+          "benchmark_source": {
+            "type": "string"
+          },
+          "warm_state_supported": {
+            "type": "boolean"
+          },
+          "management_supported": {
+            "type": "boolean"
+          },
+          "telemetry_level": {
+            "type": "string"
+          },
+          "last_observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_reported_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
         "additionalProperties": true
       }
     },

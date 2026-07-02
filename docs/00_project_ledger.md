@@ -1,6 +1,6 @@
 # Llama Wrangler Project Ledger
 
-Last updated: 2026-07-02T19:12:26Z
+Last updated: 2026-07-02T19:20:38Z
 
 This ledger is the working memory for Llama Wrangler. Use it to preserve requirements, decisions, implementation status, risks, vulnerabilities, ideas, side quests, and next actions without losing the true product direction.
 
@@ -104,6 +104,9 @@ Implemented:
 - Minimal additive opt-in OS keychain backend spike behind the existing secret-store API, enabled with `LLAMA_WRANGLER_SECRET_BACKEND=os_keychain`, with encrypted fallback retained.
 - Service-wrapper dry-run harness for review-only macOS launchd artifacts and keychain validation commands.
 - Managed Node and Passive Endpoint control-mode planning documented for future enrollment, routing, consensus, benchmark, safety, and UI-badge work.
+- App-state schema version 2 for Managed Node versus Passive Endpoint metadata.
+- Node metadata migration for control level, trust level, capability source, approval state, source fields, support flags, telemetry level, and freshness timestamps.
+- Nodes UI badges for control level, trust level, approval state, and capability source.
 - Embedded web UI at `/ui`.
 - First-run setup shell.
 - Dashboard, Nodes, Models, Splunk, IDE, and Audit UI surfaces.
@@ -171,6 +174,7 @@ Implemented:
 - Focused tests for launchd service-wrapper dry-run output, service-mode env, keychain opt-in env, plist escaping, and invalid `start --config` combinations.
 - Focused tests documenting the Phase A closure credential decision.
 - Focused tests documenting the Phase B Managed Node versus Passive Endpoint data model and UI-flow plan.
+- Focused tests for state schema version 2 migration, passive endpoint metadata defaults, bootstrap node metadata, and support-bundle node metadata.
 - Focused tests for retry-before-first-token, no-retry-after-partial-output, and cancellation telemetry.
 - Focused tests for OpenAI SSE and Ollama JSONL streaming compatibility through the public marshal routes.
 - Focused tests for queue snapshot shape, priority normalization, bootstrap queue metadata, and marshal proxy queue telemetry.
@@ -255,6 +259,9 @@ Verified:
 - Live bootstrap still reports encrypted fallback secret storage, queue scheduling, operation stats, safe defaults, client presets, and no full admin/client token pattern.
 - Live support-bundle export still reports versioned schema/privacy metadata and no token-shaped secret marker leakage.
 - In-app browser verified Settings and Nodes render with no console errors, encrypted fallback guidance visible, no full admin/client token pattern visible, and the existing subscriber flow intact.
+- Live bootstrap reports `schema_version: 2` after migrating the local app state, including the 1-to-2 migration history entry.
+- Live bootstrap and support-bundle export report node control/trust/approval/source metadata while preserving encrypted fallback, queue scheduling, safe defaults, and support-bundle privacy.
+- In-app browser verified Nodes shows Managed/Local/Approved badges and capability source with no console errors and no full admin/client token patterns.
 
 ## Active Service State
 
@@ -307,8 +314,9 @@ Status: complete as of 2026-07-02T19:09:53Z.
 
 Status: active planning and next implementation phase.
 
-- Plan and implement Managed Node versus Passive Endpoint data model with control/trust metadata.
-- Add UI badges for control level, trust level, approval state, and capability source.
+- Done: implement Managed Node versus Passive Endpoint data model foundation with control/trust/source/approval/freshness metadata.
+- Done: add schema version 2 migration preserving existing manually added subscribers as Managed Node records.
+- Done: add initial UI badges for control level, trust level, approval state, and capability source.
 - Add Passive Endpoint add flow with safe validation and explicit limitations.
 - Expand Managed Node install/enroll flow with approval state.
 - Complete manual subscriber enrollment with approval state.
@@ -532,8 +540,15 @@ Priority: medium.
 
 Risk: manually added nodes are approved immediately.
 
+Current mitigation:
+
+- schema version 2 records control level, trust level, capability source, approval state, and metadata freshness
+- existing manually added subscribers migrate as Managed Node records with explicit approval state
+- Nodes UI shows control/trust/approval/source badges
+
 Required mitigation:
 
+- done: add node control/trust metadata foundation
 - enrollment token flow
 - marshal approval queue
 - node identity persistence
@@ -1096,8 +1111,38 @@ Rejected for MVP:
 - Verified in-app browser Settings renders encrypted fallback Secret Storage and Backup & Restore guidance with no full token patterns and no console errors.
 - Verified in-app browser Nodes renders the existing Add Subscriber flow and current local node with no full token patterns and no console errors.
 
+### 2026-07-02T19:14:51Z
+
+- Repository checkpoint requested before additional development.
+- Created local root commit `7e6d7de` with the completed Phase A foundation and Phase B planning docs after verifying `go test ./...`.
+- Added remote `origin` as `https://github.com/LeiterConsulting/llama-wrangler.git`.
+- Push to `origin/main` is blocked in the current shell because no GitHub HTTPS credentials are configured and `gh` is not logged in. Local commit remains intact and ready to push when credentials are available.
+- Continuing Phase B: Node Enrollment and Discovery.
+- Active work item: implement the Managed Node versus Passive Endpoint state schema and migration foundation, including `control_level`, `trust_level`, `capability_source`, approval state, and source/freshness metadata.
+- Guardrail: preserve all Phase A hardening requirements, keep secrets and payloads out of state/API/support bundles, preserve existing manually added subscribers, keep changes additive, and do not claim Passive Endpoint routing/UI flow completion before it exists.
+
+### 2026-07-02T19:20:38Z
+
+- Bumped app-state schema to version `2`.
+- Added node metadata fields for `control_level`, `trust_level`, `capability_source`, `approval_state`, health/model/benchmark sources, warm/model-management support flags, telemetry level, `last_observed_at`, and `last_reported_at`.
+- Added migration from schema version `1` to `2` that preserves existing local/manual subscriber records as Managed Node metadata, defaults non-loopback manual URLs to `lan_unverified`, and preserves approved legacy nodes as `approval_state: approved`.
+- Added Passive Endpoint metadata defaults for future limited-control endpoint records: marshal-observed sources, pending approval, no management support, no warm-state support, marshal-observed telemetry, and no subscriber report timestamp.
+- Added initial Nodes UI badges for control level, trust level, approval state, and capability source.
+- Updated configuration storage docs, UI/API docs, support-bundle docs, support-bundle JSON schema, and the Phase B plan to reflect the implemented schema foundation.
+- Added focused tests for schema migration, passive endpoint metadata defaults, bootstrap metadata, and support-bundle metadata.
+- Verified `jq empty schemas/support_bundle.schema.json`.
+- Verified `go test ./internal/appstate ./internal/httpapi`.
+- Verified `go test ./...`.
+- Verified `go build ./cmd/llama-wrangler`.
+- Restarted the local service at `http://localhost:11435/ui/`.
+- Verified live `/healthz`.
+- Verified live bootstrap reports `schema_version: 2`, migration history, node control/trust/source/approval/freshness metadata, encrypted fallback status, queue scheduling, and safe defaults.
+- Verified live support-bundle export reports support-bundle schema version `1`, service schema version `2`, node metadata, privacy flags, and no token-shaped secret marker leakage.
+- Verified in-app browser Nodes renders Managed/Local/Approved badges and capability source with no console errors and no full admin/client token patterns.
+- Scope not completed yet: dedicated Passive Endpoint add flow, subscriber enrollment approval workflow, routing/consensus/benchmark policy use of control/trust metadata.
+
 ## Next Recommended Work
 
-1. Implement the Phase B state/schema slice for Managed Node versus Passive Endpoint metadata: `control_level`, `trust_level`, `capability_source`, approval state, and source/freshness fields.
-2. Add migrations that preserve existing manually added subscribers and keep secrets out of ordinary app state and support bundles.
-3. Surface initial control/trust badges in the Nodes UI and bootstrap metadata without claiming unsupported Passive Endpoint controls.
+1. Add the Passive Endpoint add flow with endpoint URL, display name, explicit trust-level selection, safe `/api/tags` validation, limitations copy, and passive metadata defaults.
+2. Preserve Managed Node subscriber add behavior while separating it visually from Passive Endpoint addition.
+3. Add focused tests for passive endpoint API/UI behavior, support-bundle privacy, and no prompt/payload/secret persistence.

@@ -15,6 +15,18 @@ The MVP writes `state.json` with:
 - session affinity records
 - recent metadata-only audit events
 
+Current app-state schema version: `2`.
+
+Schema version `2` adds Managed Node versus Passive Endpoint metadata to node records:
+
+- `control_level`: `managed` or `passive`
+- `trust_level`: `local`, `lan_trusted`, `lan_unverified`, or `external`
+- `capability_source`: `subscriber_reported`, `marshal_observed`, or `manual`
+- `approval_state`: `pending`, `approved`, `rejected`, or `revoked`
+- health, model-inventory, benchmark, telemetry, management, warm-state, and freshness metadata
+
+Existing schema version `1` nodes migrate in place. Existing local and manually added subscriber records default to `managed`; non-loopback manual subscriber URLs default to `lan_unverified`; approved legacy nodes receive `approval_state: approved`.
+
 Secrets are not stored in `state.json`. Local fallback secret storage uses:
 
 - `secrets.enc.json`: AES-GCM encrypted secret payloads

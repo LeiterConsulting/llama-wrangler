@@ -230,10 +230,20 @@ function renderNodes() {
 
 function nodeCard(node) {
   const models = (node.models || []).map((m) => m.name).join(", ") || "No models detected";
+  const control = node.control_level || "managed";
+  const trust = node.trust_level || "local";
+  const approval = node.approval_state || (node.approved ? "approved" : "pending");
+  const capability = node.capability_source || "subscriber_reported";
   return `<article class="card">
     <h2>${escapeHTML(node.display_name || node.node_id)}</h2>
-    <p><span class="status ${node.status === "healthy" ? "" : "warn"}">${node.status}</span></p>
+    <p class="badge-row">
+      <span class="status ${node.status === "healthy" ? "" : "warn"}">${escapeHTML(node.status || "unknown")}</span>
+      <span class="status ${control === "passive" ? "warn" : ""}">${escapeHTML(formatNodeMeta(control))}</span>
+      <span class="status ${trustBadgeClass(trust)}">${escapeHTML(formatNodeMeta(trust))}</span>
+      <span class="status ${approval === "approved" ? "" : "warn"}">${escapeHTML(formatNodeMeta(approval))}</span>
+    </p>
     <div class="row"><span>Role</span><strong>${node.role}</strong></div>
+    <div class="row"><span>Capability source</span><strong>${escapeHTML(formatNodeMeta(capability))}</strong></div>
     <div class="row"><span>Host</span><strong>${node.hostname || node.url || "local"}</strong></div>
     <div class="row"><span>Platform</span><strong>${node.platform}/${node.arch}</strong></div>
     <div class="row"><span>Ollama</span><strong>${node.ollama_available ? "available" : "not detected"}</strong></div>
@@ -241,6 +251,14 @@ function nodeCard(node) {
     <button data-node="${node.node_id}" data-node-action="benchmark">Run benchmark</button>
     <button data-node="${node.node_id}" data-node-action="${node.enabled ? "disable" : "enable"}">${node.enabled ? "Disable" : "Enable"}</button>
   </article>`;
+}
+
+function formatNodeMeta(value) {
+  return String(value || "unknown").replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function trustBadgeClass(trust) {
+  return ["lan_unverified", "external"].includes(trust) ? "warn" : "";
 }
 
 function renderModels() {

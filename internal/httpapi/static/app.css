@@ -135,6 +135,12 @@ button.danger {
   color: #166534;
 }
 
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .warn {
   background: #fff7ed;
   color: #9a3412;

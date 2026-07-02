@@ -6,16 +6,52 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"llama-wrangler/internal/config"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
+
+const (
+	ControlLevelManaged = "managed"
+	ControlLevelPassive = "passive"
+
+	TrustLevelLocal         = "local"
+	TrustLevelLANTrusted    = "lan_trusted"
+	TrustLevelLANUnverified = "lan_unverified"
+	TrustLevelExternal      = "external"
+
+	CapabilitySourceSubscriberReported = "subscriber_reported"
+	CapabilitySourceMarshalObserved    = "marshal_observed"
+	CapabilitySourceManual             = "manual"
+
+	ApprovalStatePending  = "pending"
+	ApprovalStateApproved = "approved"
+	ApprovalStateRejected = "rejected"
+	ApprovalStateRevoked  = "revoked"
+
+	HealthSourceSubscriberReported = "subscriber_reported"
+	HealthSourceMarshalObserved    = "marshal_observed"
+
+	ModelInventorySourceSubscriberReported = "subscriber_reported"
+	ModelInventorySourceMarshalObserved    = "marshal_observed"
+	ModelInventorySourceManual             = "manual"
+
+	BenchmarkSourceSubscriberReported = "subscriber_reported"
+	BenchmarkSourceMarshalObserved    = "marshal_observed"
+	BenchmarkSourceNone               = "none"
+
+	TelemetryLevelRichMetadata            = "rich_metadata"
+	TelemetryLevelMarshalObservedMetadata = "marshal_observed_metadata"
+)
 
 type Store struct {
 	mu    sync.RWMutex
@@ -50,30 +86,42 @@ type MigrationRecord struct {
 }
 
 type Node struct {
-	NodeID          string                 `json:"node_id"`
-	DisplayName     string                 `json:"display_name"`
-	URL             string                 `json:"url"`
-	Role            string                 `json:"role"`
-	Hostname        string                 `json:"hostname"`
-	Platform        string                 `json:"platform"`
-	Arch            string                 `json:"arch"`
-	CPU             string                 `json:"cpu,omitempty"`
-	GPU             string                 `json:"gpu,omitempty"`
-	MemoryTotalGB   float64                `json:"memory_total_gb,omitempty"`
-	MemoryAvailGB   float64                `json:"memory_available_gb,omitempty"`
-	OllamaAvailable bool                   `json:"ollama_available"`
-	OllamaURL       string                 `json:"ollama_url"`
-	OllamaVersion   string                 `json:"ollama_version,omitempty"`
-	Models          []ModelState           `json:"models"`
-	Tags            []string               `json:"tags"`
-	Status          string                 `json:"status"`
-	Enabled         bool                   `json:"enabled"`
-	Approved        bool                   `json:"approved"`
-	ActiveJobs      int                    `json:"active_jobs"`
-	MaxJobs         int                    `json:"max_jobs"`
-	QueueDepth      int                    `json:"queue_depth"`
-	Observed        map[string]interface{} `json:"observed,omitempty"`
-	LastSeen        time.Time              `json:"last_seen"`
+	NodeID               string                 `json:"node_id"`
+	DisplayName          string                 `json:"display_name"`
+	URL                  string                 `json:"url"`
+	Role                 string                 `json:"role"`
+	ControlLevel         string                 `json:"control_level"`
+	TrustLevel           string                 `json:"trust_level"`
+	CapabilitySource     string                 `json:"capability_source"`
+	ApprovalState        string                 `json:"approval_state"`
+	HealthSource         string                 `json:"health_source"`
+	ModelInventorySource string                 `json:"model_inventory_source"`
+	BenchmarkSource      string                 `json:"benchmark_source"`
+	WarmStateSupported   bool                   `json:"warm_state_supported"`
+	ManagementSupported  bool                   `json:"management_supported"`
+	TelemetryLevel       string                 `json:"telemetry_level"`
+	Hostname             string                 `json:"hostname"`
+	Platform             string                 `json:"platform"`
+	Arch                 string                 `json:"arch"`
+	CPU                  string                 `json:"cpu,omitempty"`
+	GPU                  string                 `json:"gpu,omitempty"`
+	MemoryTotalGB        float64                `json:"memory_total_gb,omitempty"`
+	MemoryAvailGB        float64                `json:"memory_available_gb,omitempty"`
+	OllamaAvailable      bool                   `json:"ollama_available"`
+	OllamaURL            string                 `json:"ollama_url"`
+	OllamaVersion        string                 `json:"ollama_version,omitempty"`
+	Models               []ModelState           `json:"models"`
+	Tags                 []string               `json:"tags"`
+	Status               string                 `json:"status"`
+	Enabled              bool                   `json:"enabled"`
+	Approved             bool                   `json:"approved"`
+	ActiveJobs           int                    `json:"active_jobs"`
+	MaxJobs              int                    `json:"max_jobs"`
+	QueueDepth           int                    `json:"queue_depth"`
+	Observed             map[string]interface{} `json:"observed,omitempty"`
+	LastSeen             time.Time              `json:"last_seen"`
+	LastObservedAt       *time.Time             `json:"last_observed_at,omitempty"`
+	LastReportedAt       *time.Time             `json:"last_reported_at,omitempty"`
 }
 
 type ModelState struct {
@@ -103,11 +151,15 @@ type ClientAPIKey struct {
 }
 
 type EnrollmentRequest struct {
-	NodeID    string    `json:"node_id"`
-	URL       string    `json:"url"`
-	Hostname  string    `json:"hostname"`
-	TokenHash string    `json:"token_hash,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	NodeID           string    `json:"node_id"`
+	URL              string    `json:"url"`
+	Hostname         string    `json:"hostname"`
+	ControlLevel     string    `json:"control_level,omitempty"`
+	TrustLevel       string    `json:"trust_level,omitempty"`
+	CapabilitySource string    `json:"capability_source,omitempty"`
+	ApprovalState    string    `json:"approval_state,omitempty"`
+	TokenHash        string    `json:"token_hash,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type AuditEvent struct {
@@ -235,6 +287,18 @@ func (s *Store) migrateLocked() (bool, error) {
 		})
 		migrated = true
 	}
+	if s.state.SchemaVersion == 1 {
+		s.state.Nodes = normalizeNodeMap(s.state.Nodes)
+		s.state.EnrollmentQueue = normalizeEnrollmentQueue(s.state.EnrollmentQueue)
+		s.state.SchemaVersion = 2
+		s.state.MigrationHistory = append(s.state.MigrationHistory, MigrationRecord{
+			FromVersion: 1,
+			ToVersion:   2,
+			AppliedAt:   time.Now().UTC(),
+			Description: "Added Managed Node and Passive Endpoint control, trust, approval, capability source, and freshness metadata.",
+		})
+		migrated = true
+	}
 	if s.state.SchemaVersion < CurrentSchemaVersion {
 		return migrated, fmt.Errorf("state schema version %d has no migration path to %d", s.state.SchemaVersion, CurrentSchemaVersion)
 	}
@@ -291,6 +355,7 @@ func (s *Store) UpsertNode(node Node) error {
 	if node.Models == nil {
 		node.Models = []ModelState{}
 	}
+	node = normalizeNode(node)
 	s.state.Nodes[node.NodeID] = node
 	s.state.UpdatedAt = time.Now().UTC()
 	return s.saveLocked()
@@ -424,6 +489,14 @@ func ensureNodeMap(nodes map[string]Node) map[string]Node {
 	return nodes
 }
 
+func normalizeNodeMap(nodes map[string]Node) map[string]Node {
+	nodes = ensureNodeMap(nodes)
+	for id, node := range nodes {
+		nodes[id] = normalizeNode(node)
+	}
+	return nodes
+}
+
 func ensureSessionMap(sessions map[string]Session) map[string]Session {
 	if sessions == nil {
 		return map[string]Session{}
@@ -450,4 +523,150 @@ func ensureEnrollmentQueue(queue []EnrollmentRequest) []EnrollmentRequest {
 		return []EnrollmentRequest{}
 	}
 	return queue
+}
+
+func normalizeEnrollmentQueue(queue []EnrollmentRequest) []EnrollmentRequest {
+	queue = ensureEnrollmentQueue(queue)
+	for i := range queue {
+		if queue[i].ControlLevel == "" {
+			queue[i].ControlLevel = ControlLevelManaged
+		}
+		if queue[i].TrustLevel == "" {
+			queue[i].TrustLevel = trustLevelForEndpoint(queue[i].URL, false)
+		}
+		if queue[i].CapabilitySource == "" {
+			queue[i].CapabilitySource = CapabilitySourceSubscriberReported
+		}
+		if queue[i].ApprovalState == "" {
+			queue[i].ApprovalState = ApprovalStatePending
+		}
+	}
+	return queue
+}
+
+func normalizeNode(node Node) Node {
+	if node.ControlLevel == "" {
+		if strings.EqualFold(node.Role, ControlLevelPassive) {
+			node.ControlLevel = ControlLevelPassive
+		} else {
+			node.ControlLevel = ControlLevelManaged
+		}
+	}
+	if node.ControlLevel != ControlLevelPassive && node.ControlLevel != ControlLevelManaged {
+		node.ControlLevel = ControlLevelManaged
+	}
+	if node.TrustLevel == "" {
+		node.TrustLevel = trustLevelForEndpoint(primaryNodeEndpoint(node), node.URL == "" && node.OllamaURL == "")
+	}
+	if node.ApprovalState == "" {
+		if node.Approved {
+			node.ApprovalState = ApprovalStateApproved
+		} else {
+			node.ApprovalState = ApprovalStatePending
+		}
+	}
+	if node.ApprovalState == ApprovalStateApproved {
+		node.Approved = true
+	}
+	if node.ControlLevel == ControlLevelPassive {
+		if node.CapabilitySource == "" {
+			node.CapabilitySource = CapabilitySourceMarshalObserved
+		}
+		if node.HealthSource == "" {
+			node.HealthSource = HealthSourceMarshalObserved
+		}
+		if node.ModelInventorySource == "" {
+			node.ModelInventorySource = ModelInventorySourceMarshalObserved
+		}
+		if node.BenchmarkSource == "" {
+			node.BenchmarkSource = BenchmarkSourceNone
+		}
+		if node.TelemetryLevel == "" {
+			node.TelemetryLevel = TelemetryLevelMarshalObservedMetadata
+		}
+		node.WarmStateSupported = false
+		node.ManagementSupported = false
+	} else {
+		if node.CapabilitySource == "" {
+			node.CapabilitySource = CapabilitySourceSubscriberReported
+		}
+		if node.HealthSource == "" {
+			node.HealthSource = HealthSourceSubscriberReported
+		}
+		if node.ModelInventorySource == "" {
+			node.ModelInventorySource = ModelInventorySourceSubscriberReported
+		}
+		if node.BenchmarkSource == "" {
+			node.BenchmarkSource = BenchmarkSourceNone
+		}
+		if node.TelemetryLevel == "" {
+			node.TelemetryLevel = TelemetryLevelRichMetadata
+		}
+		node.ManagementSupported = true
+	}
+	if node.LastSeen.IsZero() {
+		node.LastSeen = time.Now().UTC()
+	} else {
+		node.LastSeen = node.LastSeen.UTC()
+	}
+	if node.LastObservedAt == nil || node.LastObservedAt.IsZero() {
+		node.LastObservedAt = timePtr(node.LastSeen)
+	} else {
+		observed := node.LastObservedAt.UTC()
+		node.LastObservedAt = &observed
+	}
+	if node.ControlLevel == ControlLevelManaged {
+		if node.LastReportedAt == nil || node.LastReportedAt.IsZero() {
+			node.LastReportedAt = timePtr(node.LastSeen)
+		} else {
+			reported := node.LastReportedAt.UTC()
+			node.LastReportedAt = &reported
+		}
+	} else {
+		node.LastReportedAt = nil
+	}
+	return node
+}
+
+func timePtr(t time.Time) *time.Time {
+	t = t.UTC()
+	return &t
+}
+
+func primaryNodeEndpoint(node Node) string {
+	if node.URL != "" {
+		return node.URL
+	}
+	return node.OllamaURL
+}
+
+func trustLevelForEndpoint(raw string, localDefault bool) string {
+	if raw == "" {
+		if localDefault {
+			return TrustLevelLocal
+		}
+		return TrustLevelLANUnverified
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		return TrustLevelLANUnverified
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return TrustLevelLocal
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		if strings.HasSuffix(host, ".local") {
+			return TrustLevelLANUnverified
+		}
+		return TrustLevelExternal
+	}
+	if ip.IsLoopback() {
+		return TrustLevelLocal
+	}
+	if ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return TrustLevelLANUnverified
+	}
+	return TrustLevelExternal
 }
