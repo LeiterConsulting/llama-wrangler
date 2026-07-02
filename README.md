@@ -1,6 +1,6 @@
 # Llama Wrangler
 
-<img width="1536" height="1024" alt="IMG_6600" src="https://github.com/user-attachments/assets/b4129459-2630-49d7-b621-72071b173276" />
+<img width="768" height="512" alt="IMG_6600" src="https://github.com/user-attachments/assets/b4129459-2630-49d7-b621-72071b173276" />
 
 
 Llama Wrangler is a local-first control plane and friendly local web app for Ollama fleets. It presents one OpenAI- and Ollama-compatible endpoint while coordinating multiple local machines behind the scenes.
