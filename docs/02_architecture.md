@@ -42,6 +42,12 @@ Llama Wrangler distinguishes between full-control Managed Nodes and limited-cont
 
 Routing, consensus, benchmarks, safety policy, and UI badges must account for both control level and trust level. See `docs/16_node_control_modes.md`.
 
+### Future Capability Endpoints
+
+Future versions may generalize Managed Nodes and Passive Endpoints into broader Capability Endpoints for additional runtimes, providers, agent surfaces, build runners, or automation systems. This is a V2 direction, not current MVP scope.
+
+The V1 architecture should keep policy, routing, telemetry, and support-bundle metadata adaptable by using generic control level, trust level, capability source, capability, and freshness fields where they naturally fit. It should not add placeholder UI or unfinished non-Ollama integrations before the Ollama fleet control plane is functional. See `docs/19_capability_endpoint_future_plan.md`.
+
 ### Local Ollama runtime
 
 Each subscriber expects a local Ollama service, usually at `http://localhost:11434`.
@@ -98,6 +104,24 @@ llama-wrangler standalone --config ./standalone.yaml
 9. Final response is returned.
 10. Structured events are emitted to JSON logs and Splunk HEC.
 
+### V1 non-streaming consensus
+
+- consensus aliases default to two required and four maximum participants when bounds are omitted; maximum fan-out is capped at eight
+- routing applies approval, enabled/health, model availability, Managed Node control level, `local`/`lan_trusted` trust, and heartbeat freshness before fan-out
+- Passive Endpoints, `lan_unverified`, `external`, pending/revoked, disabled/unhealthy, stale/missing-heartbeat, and model-ineligible nodes do not participate
+- marshal concurrently collects bounded non-streaming responses under the request cancellation context and routing timeout
+- each participant response is capped at 8 MiB in request memory and is never persisted
+- normalized text and JSON structural comparison are implemented through a pluggable local consensus engine; regex validator and local evaluator hooks are available
+- strict majority agreement wins; no-majority ties return the earliest routing-ranked successful participant and emit disagreement metadata
+- the winning OpenAI/Ollama response body and content type are returned unchanged; consensus metadata appears in response headers only when safe debug mode is explicitly requested
+- participant failures use a fixed metadata-only vocabulary: `missing_proxy_url`, `connection_error`, `upstream_4xx`, `upstream_5xx`, `body_read_failure`, `response_size_limit`, `timeout`, and `cancellation`
+- participant failure projections contain only node ID, reason code, optional numeric upstream status, and duration; raw errors, URLs, headers, and response content are discarded from telemetry and management surfaces
+- partial participant failure does not prevent deterministic aggregation when the configured required-success bound is met
+- unmet quorum returns the requesting API family's compatibility error shape; all-participant upstream 4xx failures retain normalized upstream status semantics, timeout-driven failures return HTTP 504, and other unmet-quorum failures return HTTP 502
+- V1 streaming consensus is deliberately unsupported and rejected before fan-out; single-route SSE/JSONL behavior remains unchanged
+- enabling streaming consensus later requires a separate protocol for bounded per-participant stream collection, quorum timing, deterministic aggregation, backpressure, cancellation, response commitment, and no-retry-after-partial-output guarantees; the non-streaming engine is not evidence that those semantics are safe
+- `consensus_delta` may recommend escalation in metadata, but Frontier execution remains disabled
+
 ## Streaming and Retry Semantics
 
 Marshal retries upstream proxy attempts only before any response bytes are written to the client.
@@ -107,11 +131,13 @@ Marshal retries upstream proxy attempts only before any response bytes are writt
 - non-streaming upstream responses are buffered before the client response is committed, so read failures can still fall back before client-visible output
 - client cancellation emits cancellation telemetry and does not trigger fallback
 - retry, cancellation, and partial-output telemetry must remain metadata-only
+- non-streaming consensus cancellation cancels all in-flight participants; insufficient successful participants return a compatibility-shaped error without committing a candidate response
 
 Client compatibility checks exercise the public HTTP routes with real HTTP readers:
 
 - OpenAI-compatible `/v1/chat/completions` streaming preserves `text/event-stream` SSE framing and flushes `data: ...` lines before upstream completion
 - Ollama-compatible `/api/chat` streaming preserves newline-delimited JSON framing and flushes each JSON object line before upstream completion
+- OpenAI-compatible and Ollama-compatible non-streaming consensus checks use real marshal/participant HTTP listeners and `net/http` clients to verify partial-success winners, deterministic response shape, normalized upstream 4xx errors, HTTP 502/504 quorum errors, streaming rejection before fan-out, and payload exclusion from metadata surfaces
 
 ## Queue Visibility
 

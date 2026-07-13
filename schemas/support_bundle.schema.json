@@ -172,6 +172,10 @@
           "last_reported_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "observed": {
+            "type": "object",
+            "description": "Sanitized metadata-only observations such as heartbeat_required, heartbeat_state, benchmark workload suite IDs, task IDs, result metric names, and local fixture manifest IDs or basename hints. Must not include prompt or response bodies, fixture contents, full local fixture paths, raw headers, request bodies, payloads, tokens, or credentials."
           }
         },
         "additionalProperties": true

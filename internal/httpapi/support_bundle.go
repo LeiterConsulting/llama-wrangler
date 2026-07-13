@@ -239,7 +239,13 @@ func supportSensitiveKey(key string) bool {
 }
 
 func sanitizeSupportString(value string) string {
-	if strings.Contains(value, "lw_admin_") || strings.Contains(value, "lw_client_") {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"lw_admin_", "lw_client_", "lw_hb_", "lw_enroll_", "sk-", "secret_prompt", "secret_response"} {
+		if strings.Contains(lower, marker) {
+			return "[redacted]"
+		}
+	}
+	if strings.Contains(lower, "authorization: bearer") {
 		return "[redacted]"
 	}
 	return value

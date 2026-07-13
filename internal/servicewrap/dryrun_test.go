@@ -15,8 +15,9 @@ func TestLaunchdDryRunPlanIncludesServiceModeAndFallbackWarnings(t *testing.T) {
 			"HOME":                            "/tmp/llama-wrangler-home",
 			"LLAMA_WRANGLER_KEYCHAIN_SERVICE": "llama-wrangler-dryrun-test",
 		},
-		Label:      "com.example.llama-wrangler",
-		WorkingDir: "/Applications/Llama Wrangler",
+		Label:           "com.example.llama-wrangler",
+		WorkingDir:      "/Applications/Llama Wrangler",
+		LaunchAgentsDir: "/tmp/llama-wrangler-launch-agents",
 	})
 	if err != nil {
 		t.Fatalf("NewDryRunPlan() error = %v", err)
@@ -29,6 +30,9 @@ func TestLaunchdDryRunPlanIncludesServiceModeAndFallbackWarnings(t *testing.T) {
 	}
 	if got := plan.Environment["LLAMA_WRANGLER_SECRET_BACKEND"]; got != "os_keychain" {
 		t.Fatalf("secret backend env = %q", got)
+	}
+	if plan.WrapperPath != "/tmp/llama-wrangler-launch-agents/com.example.llama-wrangler.plist" {
+		t.Fatalf("wrapper path = %q", plan.WrapperPath)
 	}
 	if got := plan.Environment["LLAMA_WRANGLER_KEYCHAIN_SERVICE"]; got != "llama-wrangler-dryrun-test" {
 		t.Fatalf("keychain service env = %q", got)
@@ -57,16 +61,25 @@ func TestLaunchdDryRunPlanIncludesServiceModeAndFallbackWarnings(t *testing.T) {
 	}
 }
 
-func TestLaunchdDryRunPlanDoesNotIncludeKeychainEnvByDefault(t *testing.T) {
+func TestLaunchdDryRunPlanUsesEncryptedFallbackByDefault(t *testing.T) {
 	plan, err := NewDryRunPlan(Options{BinaryPath: "/usr/local/bin/llama-wrangler"})
 	if err != nil {
 		t.Fatalf("NewDryRunPlan() error = %v", err)
 	}
-	if _, ok := plan.Environment["LLAMA_WRANGLER_SECRET_BACKEND"]; ok {
-		t.Fatalf("keychain env should be opt-in: %+v", plan.Environment)
+	if got := plan.Environment["LLAMA_WRANGLER_SECRET_BACKEND"]; got != "encrypted_file" {
+		t.Fatalf("default secret backend = %q", got)
 	}
 	if got := plan.Environment["LLAMA_WRANGLER_SERVICE_MODE"]; got != "1" {
 		t.Fatalf("service mode env = %q", got)
+	}
+}
+
+func TestLaunchdDryRunRejectsUnsafeLabel(t *testing.T) {
+	for _, label := range []string{"../com.example", "com.example/agent", "com.example agent"} {
+		_, err := NewDryRunPlan(Options{BinaryPath: "/usr/local/bin/llama-wrangler", Label: label})
+		if err == nil || !strings.Contains(err.Error(), "invalid launchd label") {
+			t.Fatalf("label %q error = %v, want invalid-label error", label, err)
+		}
 	}
 }
 
@@ -86,7 +99,10 @@ func TestLaunchdDryRunEscapesPlistValues(t *testing.T) {
 		BinaryPath: "/tmp/llama&wrangler",
 		Mode:       "marshal",
 		ConfigPath: "/tmp/a<b>.yaml",
-		Label:      "com.example.llama\"wrangler",
+		Label:      "com.example.llama-wrangler",
+		Environment: map[string]string{
+			"TEST_VALUE": "llama\"wrangler",
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewDryRunPlan() error = %v", err)

@@ -79,6 +79,57 @@ Sourcetype: `llama_wrangler:response`
 }
 ```
 
+## Queue state event
+
+Sourcetype: `llama_wrangler:queue_state`
+
+```json
+{
+  "event_type": "queue_state",
+  "request_id": "req_abc123",
+  "status": "active",
+  "priority": "high",
+  "queue_depth": 2,
+  "queue_capacity": 128,
+  "surface": "openai_chat_completions",
+  "stream": true,
+  "scheduling_policy": "weighted_priority"
+}
+```
+
+## Streaming outcome events
+
+Sourcetypes: `llama_wrangler:upstream_retry`, `llama_wrangler:response_partial`, and `llama_wrangler:request_cancelled`.
+
+Allowed operational fields include request ID, selected/previous/next node ID, reason code, retry phase, retry allowed, partial-output flag, bytes written, stream flag, priority, queue status, scheduling policy, and timestamp. These events describe retry/cancellation state only.
+
+## Benchmark scheduler and runner events
+
+Sourcetypes include:
+
+- `llama_wrangler:benchmark_job_claimed`
+- `llama_wrangler:benchmark_job_status`
+- `llama_wrangler:benchmark_scheduler_reconcile`
+- `llama_wrangler:benchmark_scheduler_manual_reconcile`
+- `llama_wrangler:benchmark_scheduler_background_tick`
+- `llama_wrangler:benchmark_scheduler_policy_updated`
+- `llama_wrangler:subscriber_benchmark_runner_tick`
+
+Allowed fields include node/benchmark/suite IDs, status, scheduler policy/state, attempt bounds, changed/timed-out/retried/exhausted counts, runner mode/enablement/result policy, task count, claimed/completed/failed/no-job flags, bounded intervals, and safe error codes.
+
+## Model lifecycle action events
+
+Sourcetypes include:
+
+- `llama_wrangler:model_lifecycle_action_queued`
+- `llama_wrangler:model_lifecycle_action_claimed`
+- `llama_wrangler:model_lifecycle_action_status`
+- `llama_wrangler:model_lifecycle_action_rejected`
+
+Allowed fields include node/control/trust/approval metadata, action ID/type, model name, desired keep-warm flag, status, safe error code, and policy reason codes.
+
+Queue, streaming, benchmark, routing, consensus, and model lifecycle operational events are metadata-only. They must not contain inference content, extracted content, raw request/response material, raw headers, authorization data, secret values, local fixture contents or full paths, comparison signatures, validator/evaluator input, or arbitrary payload fields.
+
 ## Node health event
 
 Sourcetype: `llama_wrangler:node_health`
@@ -111,14 +162,39 @@ Sourcetype: `llama_wrangler:consensus`
   "execution_mode": "consensus_delta",
   "participants": ["rtx4090", "m1-max", "m3-pro"],
   "participant_count": 3,
+  "required_participants": 2,
+  "max_participants": 4,
+  "successful_participants": ["rtx4090", "m1-max"],
+  "successful_count": 2,
+  "failed_participants": ["m3-pro"],
+  "failed_count": 1,
+  "participant_failures": [
+    {
+      "node_id": "m3-pro",
+      "reason_code": "upstream_5xx",
+      "status_code": 503,
+      "duration_ms": 412
+    }
+  ],
+  "failure_reason_counts": {"upstream_5xx": 1},
   "agreement_score": 0.67,
+  "agreement_count": 2,
+  "comparison_strategy": "exact_normalized",
   "validator_passed": false,
   "winner_node": "rtx4090",
+  "consensus_reached": true,
   "disagreement_detected": true,
-  "escalation_recommended": true,
-  "escalation_reason": "no_majority"
+  "timed_out": false,
+  "client_cancelled": false,
+  "duration_ms": 1840,
+  "escalation_recommended": false,
+  "escalation_reason": "",
+  "frontier_used": false,
+  "content_recorded": false
 }
 ```
+
+Consensus events are metadata-only. Participant failure reason codes are limited to `missing_proxy_url`, `connection_error`, `upstream_4xx`, `upstream_5xx`, `body_read_failure`, `response_size_limit`, `timeout`, and `cancellation`. A participant failure may include only node ID, fixed reason code, optional numeric upstream status, and duration. Events must not contain request bodies, prompt text, response text, extracted content, arbitrary error text, upstream URLs, raw headers, credentials, token values, validator input, evaluator input, or response signatures. Participant IDs, counts, timing, agreement score, strategy ID, winner node, fixed failure reasons, and safe outcome flags are allowed.
 
 ## Frontier Delta event
 

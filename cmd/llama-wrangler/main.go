@@ -15,7 +15,7 @@ import (
 	"llama-wrangler/internal/servicewrap"
 )
 
-const version = "0.1.0"
+var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -56,6 +56,7 @@ func runServiceDryRun(args []string) {
 	label := fs.String("label", "com.llama-wrangler.marshal", "Service label")
 	workingDir := fs.String("working-dir", "", "Optional working directory")
 	logDir := fs.String("log-dir", "~/Library/Logs/Llama Wrangler", "Launchd log directory")
+	launchAgentsDir := fs.String("launch-agents-dir", "", "Launchd plist directory; defaults to the current user's Library/LaunchAgents")
 	keepAlive := fs.Bool("keep-alive", false, "Set launchd KeepAlive")
 	runAtLoad := fs.Bool("run-at-load", true, "Set launchd RunAtLoad")
 	fs.Var(&env, "env", "Additional non-secret environment variable in KEY=VALUE form")
@@ -68,17 +69,18 @@ func runServiceDryRun(args []string) {
 		}
 	}
 	plan, err := servicewrap.NewDryRunPlan(servicewrap.Options{
-		Target:         *target,
-		BinaryPath:     *binaryPath,
-		ConfigPath:     *configPath,
-		Mode:           *mode,
-		EnableKeychain: *keychain,
-		Environment:    env.Values(),
-		Label:          *label,
-		WorkingDir:     *workingDir,
-		LogDir:         *logDir,
-		KeepAlive:      *keepAlive,
-		RunAtLoad:      *runAtLoad,
+		Target:          *target,
+		BinaryPath:      *binaryPath,
+		ConfigPath:      *configPath,
+		Mode:            *mode,
+		EnableKeychain:  *keychain,
+		Environment:     env.Values(),
+		Label:           *label,
+		WorkingDir:      *workingDir,
+		LogDir:          *logDir,
+		LaunchAgentsDir: *launchAgentsDir,
+		KeepAlive:       *keepAlive,
+		RunAtLoad:       *runAtLoad,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -158,13 +160,20 @@ func runServer(cfg config.Config) {
 
 	fmt.Println("Llama Wrangler is running.")
 	fmt.Printf("Open the setup UI: http://localhost%s/ui\n", displayPort(cfg.Server.Listen))
-	if token := server.RecoveryAdminToken(); token != "" {
+	if token := server.RecoveryAdminToken(); token != "" && !serviceLikeRuntime() {
 		fmt.Printf("Local admin recovery token for this startup: %s\n", token)
+	} else if token != "" {
+		fmt.Println("Local admin recovery token suppressed in service mode; use the local setup or recovery workflow.")
 	}
 
 	if err := server.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func serviceLikeRuntime() bool {
+	value := strings.TrimSpace(os.Getenv("LLAMA_WRANGLER_SERVICE_MODE"))
+	return value == "1" || strings.EqualFold(value, "true")
 }
 
 func displayPort(listen string) string {

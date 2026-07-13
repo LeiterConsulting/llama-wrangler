@@ -1,0 +1,4 @@
+<nav search_view="search">
+  <view name="llama_wrangler_overview" default="true" />
+  <view name="llama_wrangler_operations" />
+</nav>

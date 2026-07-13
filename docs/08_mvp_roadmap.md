@@ -71,3 +71,24 @@
 - Policy editor
 - Replay/debug traces
 - Installer scripts
+
+## V1 Release Gate
+
+- Run `scripts/v1_acceptance.sh` from a clean checkout.
+- On macOS, run the default `scripts/macos_user_launchd_acceptance.sh` plan/lint gate and attach explicit opt-in disposable lifecycle evidence where required.
+- Require every automated row in `docs/21_v1_acceptance_security_matrix.md` to pass.
+- Attach real environment evidence for each intended platform's service packaging, signing/integrity, supported external clients, and Splunk runtime rows.
+- Do not convert unavailable, skipped, or environment-dependent checks into passes through documentation.
+- Keep acceptance artifacts metadata-only and exclude app data, credentials, raw HTTP captures, inference content, local fixtures, and unredacted service logs.
+
+## Future V2: Capability Endpoints
+
+Only after the V1 Ollama fleet control plane is functional, consider broader Capability Endpoint work:
+
+- generic endpoint type registry
+- non-Ollama local runtimes such as LM Studio, MLX, or vLLM
+- frontier provider endpoint adapters behind explicit policy and approval
+- Codex-style agent, IDE-agent, GitHub, Xcode, Docker, CI/CD, Splunk, or build-runner integrations
+- generic capability-based routing and policy beyond inference
+
+Do not add these integrations, UI pages, or tool-execution surfaces during the MVP unless a later ledger decision explicitly starts V2 work.

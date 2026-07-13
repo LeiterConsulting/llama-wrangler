@@ -3,13 +3,18 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -26,24 +31,27 @@ import (
 )
 
 type Server struct {
-	cfg                config.Config
-	store              *appstate.Store
-	scanner            detect.Scanner
-	tele               *telemetry.Sink
-	secrets            *secrets.Store
-	recoveryAdminToken string
-	queueScheduler     *queueScheduler
-	queueMeta          *queueTracker
-	authLimiter        *authFailureLimiter
-	client             *http.Client
+	cfg                 config.Config
+	store               *appstate.Store
+	scanner             detect.Scanner
+	tele                *telemetry.Sink
+	secrets             *secrets.Store
+	recoveryAdminToken  string
+	queueScheduler      *queueScheduler
+	queueMeta           *queueTracker
+	authLimiter         *authFailureLimiter
+	client              *http.Client
+	benchmarkBackground *benchmarkSchedulerBackground
 }
 
 func NewServer(cfg config.Config) (*Server, error) {
+	runtimeCfg := cfg
 	store, err := appstate.Open(cfg)
 	if err != nil {
 		return nil, err
 	}
 	cfg = store.Snapshot().Config
+	cfg = mergeRuntimeSecretConfig(cfg, runtimeCfg)
 	secretStore, err := secrets.Open(store.Dir())
 	if err != nil {
 		return nil, err
@@ -63,7 +71,8 @@ func NewServer(cfg config.Config) (*Server, error) {
 			defaultAuthFailureWindow,
 			defaultAuthFailureCooldown,
 		),
-		client: &http.Client{Timeout: cfg.Routing.Timeout()},
+		client:              &http.Client{Timeout: cfg.Routing.Timeout()},
+		benchmarkBackground: newBenchmarkSchedulerBackground(),
 	}
 	recoveryToken, err := server.ensureAdminToken()
 	if err != nil {
@@ -89,11 +98,33 @@ func NewServer(cfg config.Config) (*Server, error) {
 	return server, nil
 }
 
+func mergeRuntimeSecretConfig(stored config.Config, runtimeCfg config.Config) config.Config {
+	if runtimeCfg.Registration.MarshalURL != "" {
+		stored.Registration.MarshalURL = runtimeCfg.Registration.MarshalURL
+	}
+	if runtimeCfg.Registration.IntervalSeconds != 0 {
+		stored.Registration.IntervalSeconds = runtimeCfg.Registration.IntervalSeconds
+	}
+	if runtimeCfg.Registration.HeartbeatCredentialEnv != "" {
+		stored.Registration.HeartbeatCredentialEnv = runtimeCfg.Registration.HeartbeatCredentialEnv
+	}
+	if runtimeCfg.Registration.HeartbeatCredential != "" {
+		stored.Registration.HeartbeatCredential = runtimeCfg.Registration.HeartbeatCredential
+	}
+	if runtimeCfg.Registration.EnrollmentToken != "" {
+		stored.Registration.EnrollmentToken = runtimeCfg.Registration.EnrollmentToken
+	}
+	stored.Capabilities.BenchmarkRunner = config.NormalizeBenchmarkRunnerConfig(runtimeCfg.Capabilities.BenchmarkRunner)
+	return stored
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	s.routes(mux)
 	server := &http.Server{Addr: s.cfg.Server.Listen, Handler: withCORS(mux)}
 	errCh := make(chan error, 1)
+	go s.runBenchmarkSchedulerBackground(ctx)
+	go s.runSubscriberBenchmarkRunner(ctx)
 	go func() {
 		errCh <- server.ListenAndServe()
 	}()
@@ -134,9 +165,20 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /wrangler/config/export", s.requireAdmin(s.exportConfig))
 	mux.HandleFunc("POST /wrangler/support-bundle/export", s.requireAdmin(s.exportSupportBundle))
 	mux.HandleFunc("GET /wrangler/nodes", s.requireAdmin(s.nodes))
+	mux.HandleFunc("POST /wrangler/enrollment-tokens", s.requireAdmin(s.createEnrollmentToken))
 	mux.HandleFunc("POST /wrangler/nodes/manual-add", s.requireAdmin(s.manualAddNode))
+	mux.HandleFunc("POST /wrangler/nodes/passive-add", s.requireAdmin(s.passiveAddNode))
+	mux.HandleFunc("GET /wrangler/benchmarks/workload-suites", s.requireAdmin(s.benchmarkWorkloadSuitesHandler))
+	mux.HandleFunc("GET /wrangler/benchmarks/runner/guidance", s.requireAdmin(s.benchmarkRunnerGuidanceHandler))
+	mux.HandleFunc("GET /wrangler/benchmarks/scheduler/policy", s.requireAdmin(s.benchmarkSchedulerPolicy))
+	mux.HandleFunc("PUT /wrangler/benchmarks/scheduler/policy", s.requireAdmin(s.putBenchmarkSchedulerPolicy))
+	mux.HandleFunc("GET /wrangler/benchmarks/scheduler/history", s.requireAdmin(s.benchmarkSchedulerHistory))
+	mux.HandleFunc("POST /wrangler/benchmarks/scheduler/reconcile", s.requireAdmin(s.benchmarkSchedulerReconcile))
 	mux.HandleFunc("POST /wrangler/nodes/", s.requireAdmin(s.nodeAction))
 	mux.HandleFunc("GET /wrangler/models", s.requireAdmin(s.models))
+	mux.HandleFunc("GET /wrangler/models/lifecycle", s.requireAdmin(s.modelLifecycle))
+	mux.HandleFunc("GET /wrangler/models/lifecycle/action-policies", s.requireAdmin(s.modelLifecycleActionPolicies))
+	mux.HandleFunc("GET /wrangler/models/lifecycle/action-history", s.requireAdmin(s.modelLifecycleActionHistory))
 	mux.HandleFunc("GET /wrangler/aliases", s.requireAdmin(s.aliases))
 	mux.HandleFunc("PUT /wrangler/aliases", s.requireAdmin(s.putAliases))
 	mux.HandleFunc("GET /wrangler/routing/policies", s.requireAdmin(s.routingPolicies))
@@ -154,6 +196,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /wrangler/metrics", s.requireAdmin(s.metrics))
 
 	mux.HandleFunc("GET /subscriber/capabilities", s.subscriberCapabilities)
+	mux.HandleFunc("POST /subscriber/enroll", s.subscriberEnroll)
+	mux.HandleFunc("POST /subscriber/heartbeat", s.subscriberHeartbeat)
+	mux.HandleFunc("POST /subscriber/model-actions/claim", s.subscriberModelActionClaim)
+	mux.HandleFunc("POST /subscriber/model-actions/status", s.subscriberModelActionStatus)
+	mux.HandleFunc("POST /subscriber/benchmarks/claim", s.subscriberBenchmarkJobClaim)
+	mux.HandleFunc("POST /subscriber/benchmarks/status", s.subscriberBenchmarkJobStatus)
+	mux.HandleFunc("POST /subscriber/benchmarks", s.subscriberBenchmarkResult)
 	mux.HandleFunc("POST /subscriber/proxy/", s.subscriberProxy)
 
 	mux.HandleFunc("GET /v1/models", s.requireClientAPIKey(s.openAIModels))
@@ -204,23 +253,33 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	s.authLimiter.reset(authScopeAdmin, r)
 	exposure := lanExposureForListen(state.Config.Server.Listen)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"setup_complete":    state.SetupComplete,
-		"admin_token_hint":  state.AdminTokenHint,
-		"schema_version":    state.SchemaVersion,
-		"config_version":    state.ConfigVersion,
-		"migration_history": state.MigrationHistory,
-		"secret_storage":    s.secrets.Status(),
-		"role":              state.Role,
-		"node_id":           state.NodeID,
-		"config":            sanitizeConfig(state.Config),
-		"nodes":             state.Nodes,
-		"sessions":          state.Sessions,
-		"client_api_keys":   state.ClientAPIKeys,
-		"client_presets":    s.buildClientPresets(r),
-		"queue_depth":       s.queueDepth(),
-		"queue":             s.queueSnapshot(),
-		"operation_stats":   s.operationStats(),
-		"auth_rate_limit":   s.authLimiter.metadata(),
+		"setup_complete":                 state.SetupComplete,
+		"admin_token_hint":               state.AdminTokenHint,
+		"schema_version":                 state.SchemaVersion,
+		"config_version":                 state.ConfigVersion,
+		"migration_history":              state.MigrationHistory,
+		"secret_storage":                 s.secrets.Status(),
+		"role":                           state.Role,
+		"node_id":                        state.NodeID,
+		"config":                         sanitizeConfig(state.Config),
+		"nodes":                          state.Nodes,
+		"enrollment_queue":               sanitizeEnrollmentQueue(state.EnrollmentQueue),
+		"sessions":                       state.Sessions,
+		"client_api_keys":                state.ClientAPIKeys,
+		"client_presets":                 s.buildClientPresets(r),
+		"queue_depth":                    s.queueDepth(),
+		"queue":                          s.queueSnapshot(),
+		"operation_stats":                s.operationStats(),
+		"routing_policy_status":          s.routingPolicyStatus(),
+		"benchmark_policy_status":        s.benchmarkPolicyStatus(),
+		"benchmark_scheduler":            s.benchmarkSchedulerStatus(),
+		"benchmark_runner":               s.buildBenchmarkRunnerGuidance(requestBaseURL(r)),
+		"benchmark_workload":             benchmarkWorkloadSuiteStatus(),
+		"benchmark_workload_suites":      benchmarkWorkloadSuites(),
+		"model_lifecycle":                s.modelLifecycleStatus(),
+		"model_lifecycle_actions":        s.modelLifecycleActionPolicyStatus(),
+		"model_lifecycle_action_history": s.modelLifecycleActionHistoryStatus(ModelLifecycleActionHistoryFilter{Limit: modelLifecycleActionHistoryDefaultLimit}),
+		"auth_rate_limit":                s.authLimiter.metadata(),
 		"safe_defaults": map[string]interface{}{
 			"frontier_enabled":                 state.Config.Frontier.Enabled,
 			"local_only":                       state.Config.Frontier.LocalOnly,
@@ -251,10 +310,17 @@ func (s *Server) scanLocal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) discoverPeers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"peers":   []interface{}{},
-		"message": "mDNS discovery is reserved for the next pass. Manual peer enrollment is available through node URLs.",
+	status := s.discoverPeersStatus(r.Context())
+	s.tele.Emit("peer_discovery", telemetry.Event{
+		"mode":                  status.Mode,
+		"status":                status.Status,
+		"mdns_status":           status.MDNS.Status,
+		"candidate_count":       len(status.Candidates),
+		"subnet_scan_enabled":   status.SubnetScan.Enabled,
+		"subnet_scan_status":    status.SubnetScan.Status,
+		"mdns_services_queried": len(status.MDNS.Services),
 	})
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) applyRecommended(w http.ResponseWriter, r *http.Request) {
@@ -365,6 +431,392 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Snapshot().Nodes)
 }
 
+func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		NodeID        string `json:"node_id"`
+		SubscriberURL string `json:"subscriber_url"`
+		Hostname      string `json:"hostname"`
+		TrustLevel    string `json:"trust_level"`
+		TTLMinutes    int    `json:"ttl_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	trustLevel := strings.TrimSpace(body.TrustLevel)
+	if trustLevel == "" {
+		trustLevel = appstate.TrustLevelLANUnverified
+	}
+	if !validTrustLevel(trustLevel) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid trust_level is required"})
+		return
+	}
+	subscriberURL := ""
+	if strings.TrimSpace(body.SubscriberURL) != "" {
+		var err error
+		subscriberURL, err = normalizeEndpointURL(body.SubscriberURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": strings.Replace(err.Error(), "endpoint_url", "subscriber_url", 1)})
+			return
+		}
+	}
+	ttl := time.Duration(body.TTLMinutes) * time.Minute
+	if ttl <= 0 || ttl > 24*time.Hour {
+		ttl = 15 * time.Minute
+	}
+	token := newToken("lw_enroll_")
+	now := time.Now().UTC()
+	req, err := s.store.AddEnrollmentRequest(appstate.EnrollmentRequest{
+		NodeID:           strings.TrimSpace(body.NodeID),
+		URL:              subscriberURL,
+		Hostname:         strings.TrimSpace(body.Hostname),
+		ControlLevel:     appstate.ControlLevelManaged,
+		TrustLevel:       trustLevel,
+		CapabilitySource: appstate.CapabilitySourceSubscriberReported,
+		ApprovalState:    appstate.ApprovalStatePending,
+		TokenHash:        enrollmentTokenHash(token),
+		TokenHint:        tokenHint(token),
+		CreatedAt:        now,
+		ExpiresAt:        now.Add(ttl),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.tele.Emit("enrollment_token_created", telemetry.Event{
+		"node_id":       req.NodeID,
+		"control_level": req.ControlLevel,
+		"trust_level":   req.TrustLevel,
+		"expires_at":    req.ExpiresAt,
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token":      token,
+		"token_hint": req.TokenHint,
+		"expires_at": req.ExpiresAt,
+		"request":    sanitizeEnrollmentQueue([]appstate.EnrollmentRequest{req})[0],
+	})
+}
+
+func (s *Server) subscriberEnroll(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token           string                `json:"token"`
+		NodeID          string                `json:"node_id"`
+		DisplayName     string                `json:"display_name"`
+		SubscriberURL   string                `json:"subscriber_url"`
+		URL             string                `json:"url"`
+		Hostname        string                `json:"hostname"`
+		Platform        string                `json:"platform"`
+		Arch            string                `json:"arch"`
+		Status          string                `json:"status"`
+		OllamaAvailable bool                  `json:"ollama_available"`
+		OllamaURL       string                `json:"ollama_url"`
+		OllamaVersion   string                `json:"ollama_version"`
+		Models          []appstate.ModelState `json:"models"`
+		Tags            []string              `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	body.Token = strings.TrimSpace(body.Token)
+	if body.Token == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "enrollment_token_required"})
+		return
+	}
+	subscriberURL := strings.TrimSpace(body.SubscriberURL)
+	if subscriberURL == "" {
+		subscriberURL = strings.TrimSpace(body.URL)
+	}
+	if subscriberURL != "" {
+		var err error
+		subscriberURL, err = normalizeEndpointURL(subscriberURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": strings.Replace(err.Error(), "endpoint_url", "subscriber_url", 1)})
+			return
+		}
+	}
+	now := time.Now().UTC()
+	status := strings.TrimSpace(body.Status)
+	if status == "" {
+		status = "registered"
+	}
+	node := appstate.Node{
+		NodeID:               strings.TrimSpace(body.NodeID),
+		DisplayName:          strings.TrimSpace(body.DisplayName),
+		URL:                  subscriberURL,
+		Role:                 "subscriber",
+		ControlLevel:         appstate.ControlLevelManaged,
+		CapabilitySource:     appstate.CapabilitySourceSubscriberReported,
+		ApprovalState:        appstate.ApprovalStatePending,
+		HealthSource:         appstate.HealthSourceSubscriberReported,
+		ModelInventorySource: appstate.ModelInventorySourceSubscriberReported,
+		BenchmarkSource:      appstate.BenchmarkSourceSubscriberReported,
+		WarmStateSupported:   true,
+		ManagementSupported:  true,
+		TelemetryLevel:       appstate.TelemetryLevelRichMetadata,
+		Hostname:             strings.TrimSpace(body.Hostname),
+		Platform:             strings.TrimSpace(body.Platform),
+		Arch:                 strings.TrimSpace(body.Arch),
+		Status:               status,
+		Enabled:              true,
+		Approved:             false,
+		OllamaAvailable:      body.OllamaAvailable,
+		OllamaURL:            strings.TrimSpace(body.OllamaURL),
+		OllamaVersion:        strings.TrimSpace(body.OllamaVersion),
+		Models:               sanitizeModelStates(body.Models),
+		Tags:                 body.Tags,
+		LastSeen:             now,
+		LastReportedAt:       &now,
+		Observed: map[string]interface{}{
+			"enrollment_status":  "registered_pending_approval",
+			"heartbeat_required": true,
+			"heartbeat_state":    "fresh",
+		},
+	}
+	applyModelLifecycleObserved(&node, modelLifecycleSourceSubscriberReported, modelLifecycleModeRich, now)
+	req, err := s.store.RegisterEnrollmentNode(enrollmentTokenHash(body.Token), node, appstate.EnrollmentRequest{
+		Hostname: strings.TrimSpace(body.Hostname),
+	}, now)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_or_expired_enrollment_token"})
+		return
+	}
+	stored := s.store.Snapshot().Nodes[req.NodeID]
+	heartbeatCredential := deriveSubscriberHeartbeatCredential(body.Token, stored.NodeID)
+	if err := s.secrets.Set(subscriberHeartbeatSecretKey(stored.NodeID), heartbeatCredential); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if stored.Observed == nil {
+		stored.Observed = map[string]interface{}{}
+	}
+	stored.Observed["heartbeat_auth_method"] = "shared_secret"
+	stored.Observed["heartbeat_auth_required"] = true
+	stored.Observed["heartbeat_token_hint"] = tokenHint(heartbeatCredential)
+	stored.Observed["heartbeat_credential_derivation"] = "hmac_sha256_enrollment_token_node_id_v1"
+	if err := s.store.UpsertNode(stored); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	stored = s.store.Snapshot().Nodes[stored.NodeID]
+	s.tele.Emit("managed_node_registered", telemetry.Event{
+		"node_id":           stored.NodeID,
+		"control_level":     stored.ControlLevel,
+		"trust_level":       stored.TrustLevel,
+		"approval_state":    stored.ApprovalState,
+		"capability_source": stored.CapabilitySource,
+		"heartbeat_auth":    "shared_secret",
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "pending_approval",
+		"node":   stored,
+		"heartbeat_auth": map[string]string{
+			"method":                "shared_secret",
+			"header":                "X-Llama-Wrangler-Subscriber-Token",
+			"credential_derivation": "hmac_sha256_enrollment_token_node_id_v1",
+			"token_hint":            tokenHint(heartbeatCredential),
+		},
+	})
+}
+
+func (s *Server) verifySubscriberHeartbeatCredential(w http.ResponseWriter, r *http.Request, node appstate.Node) bool {
+	stored := s.secrets.Get(subscriberHeartbeatSecretKey(node.NodeID))
+	if stored == "" {
+		if node.Observed != nil && node.Observed["heartbeat_auth_method"] == "shared_secret" {
+			s.tele.Emit("managed_node_heartbeat_auth_failed", telemetry.Event{
+				"node_id":        node.NodeID,
+				"reason":         "credential_unavailable",
+				"control_level":  node.ControlLevel,
+				"approval_state": node.ApprovalState,
+			})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "subscriber_heartbeat_auth_unavailable"})
+			return false
+		}
+		return true
+	}
+	provided := subscriberHeartbeatToken(r)
+	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(stored)) != 1 {
+		s.tele.Emit("managed_node_heartbeat_auth_failed", telemetry.Event{
+			"node_id":        node.NodeID,
+			"reason":         "invalid_or_missing_credential",
+			"control_level":  node.ControlLevel,
+			"approval_state": node.ApprovalState,
+		})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "subscriber_heartbeat_auth_required"})
+		return false
+	}
+	return true
+}
+
+func (s *Server) rotateSubscriberHeartbeatCredential(node appstate.Node, source string) (appstate.Node, string, error) {
+	if node.ControlLevel != "" && node.ControlLevel != appstate.ControlLevelManaged {
+		return node, "", fmt.Errorf("heartbeat credentials are only supported for managed nodes")
+	}
+	credential := newToken("lw_hb_")
+	if err := s.secrets.Set(subscriberHeartbeatSecretKey(node.NodeID), credential); err != nil {
+		return node, "", err
+	}
+	if node.Observed == nil {
+		node.Observed = map[string]interface{}{}
+	}
+	now := time.Now().UTC()
+	node.Observed["heartbeat_auth_method"] = "shared_secret"
+	node.Observed["heartbeat_auth_required"] = true
+	node.Observed["heartbeat_token_hint"] = tokenHint(credential)
+	node.Observed["heartbeat_credential_derivation"] = "random_shared_secret_v1"
+	node.Observed["heartbeat_credential_provisioned_at"] = now
+	node.Observed["heartbeat_credential_provisioned_by"] = source
+	node.Observed["heartbeat_identity_verified"] = false
+	node.Observed["heartbeat_reprovisioning_required"] = true
+	return node, credential, nil
+}
+
+func (s *Server) subscriberHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		NodeID          string                `json:"node_id"`
+		DisplayName     string                `json:"display_name"`
+		SubscriberURL   string                `json:"subscriber_url"`
+		URL             string                `json:"url"`
+		Hostname        string                `json:"hostname"`
+		Platform        string                `json:"platform"`
+		Arch            string                `json:"arch"`
+		Status          string                `json:"status"`
+		OllamaAvailable bool                  `json:"ollama_available"`
+		OllamaURL       string                `json:"ollama_url"`
+		OllamaVersion   string                `json:"ollama_version"`
+		Models          []appstate.ModelState `json:"models"`
+		Tags            []string              `json:"tags"`
+		ActiveJobs      int                   `json:"active_jobs"`
+		QueueDepth      int                   `json:"queue_depth"`
+		MemoryTotalGB   float64               `json:"memory_total_gb"`
+		MemoryAvailGB   float64               `json:"memory_available_gb"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	nodeID := strings.TrimSpace(body.NodeID)
+	if nodeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "node_id is required"})
+		return
+	}
+	state := s.store.Snapshot()
+	node, ok := state.Nodes[nodeID]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "node not found"})
+		return
+	}
+	if node.ControlLevel != "" && node.ControlLevel != appstate.ControlLevelManaged {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "heartbeat is only supported for managed nodes"})
+		return
+	}
+	if !s.verifySubscriberHeartbeatCredential(w, r, node) {
+		return
+	}
+	subscriberURL := strings.TrimSpace(body.SubscriberURL)
+	if subscriberURL == "" {
+		subscriberURL = strings.TrimSpace(body.URL)
+	}
+	if subscriberURL != "" {
+		var err error
+		subscriberURL, err = normalizeEndpointURL(subscriberURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": strings.Replace(err.Error(), "endpoint_url", "subscriber_url", 1)})
+			return
+		}
+		node.URL = subscriberURL
+	}
+	now := time.Now().UTC()
+	if body.DisplayName != "" {
+		node.DisplayName = strings.TrimSpace(body.DisplayName)
+	}
+	if body.Hostname != "" {
+		node.Hostname = strings.TrimSpace(body.Hostname)
+	}
+	if body.Platform != "" {
+		node.Platform = strings.TrimSpace(body.Platform)
+	}
+	if body.Arch != "" {
+		node.Arch = strings.TrimSpace(body.Arch)
+	}
+	if body.Status != "" {
+		node.Status = strings.TrimSpace(body.Status)
+	} else if node.Status == "" || node.Status == "registered" || node.Status == "stale" {
+		node.Status = "healthy"
+	}
+	node.Role = "subscriber"
+	node.ControlLevel = appstate.ControlLevelManaged
+	node.CapabilitySource = appstate.CapabilitySourceSubscriberReported
+	node.HealthSource = appstate.HealthSourceSubscriberReported
+	node.ModelInventorySource = appstate.ModelInventorySourceSubscriberReported
+	node.BenchmarkSource = appstate.BenchmarkSourceSubscriberReported
+	node.WarmStateSupported = true
+	node.ManagementSupported = true
+	node.TelemetryLevel = appstate.TelemetryLevelRichMetadata
+	node.OllamaAvailable = body.OllamaAvailable
+	if body.OllamaURL != "" {
+		node.OllamaURL = strings.TrimSpace(body.OllamaURL)
+	}
+	if body.OllamaVersion != "" {
+		node.OllamaVersion = strings.TrimSpace(body.OllamaVersion)
+	}
+	if body.Models != nil {
+		node.Models = sanitizeModelStates(body.Models)
+	}
+	if body.Tags != nil {
+		node.Tags = body.Tags
+	}
+	node.ActiveJobs = body.ActiveJobs
+	node.QueueDepth = body.QueueDepth
+	if body.MemoryTotalGB > 0 {
+		node.MemoryTotalGB = body.MemoryTotalGB
+	}
+	if body.MemoryAvailGB > 0 {
+		node.MemoryAvailGB = body.MemoryAvailGB
+	}
+	node.LastSeen = now
+	node.LastReportedAt = &now
+	if node.Observed == nil {
+		node.Observed = map[string]interface{}{}
+	}
+	node.Observed["heartbeat_required"] = true
+	node.Observed["heartbeat_state"] = "fresh"
+	node.Observed["heartbeat_at"] = now
+	applyModelLifecycleObserved(&node, modelLifecycleSourceSubscriberReported, modelLifecycleModeRich, now)
+	if s.secrets.Get(subscriberHeartbeatSecretKey(node.NodeID)) != "" {
+		node.Observed["heartbeat_auth_method"] = "shared_secret"
+		node.Observed["heartbeat_auth_required"] = true
+		node.Observed["heartbeat_identity_verified"] = true
+		node.Observed["heartbeat_reprovisioning_required"] = false
+	} else if node.Observed["heartbeat_auth_method"] == nil {
+		node.Observed["heartbeat_auth_method"] = "legacy_unverified"
+		node.Observed["heartbeat_identity_verified"] = false
+	}
+	if err := s.store.UpsertNode(node); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	stored := s.store.Snapshot().Nodes[node.NodeID]
+	s.tele.Emit("managed_node_heartbeat", telemetry.Event{
+		"node_id":           stored.NodeID,
+		"control_level":     stored.ControlLevel,
+		"trust_level":       stored.TrustLevel,
+		"approval_state":    stored.ApprovalState,
+		"status":            stored.Status,
+		"model_count":       len(stored.Models),
+		"warm_model_count":  stored.Observed["warm_model_count"],
+		"keep_warm_count":   stored.Observed["keep_warm_count"],
+		"active_jobs":       stored.ActiveJobs,
+		"queue_depth":       stored.QueueDepth,
+		"capability_source": stored.CapabilitySource,
+		"heartbeat_auth":    stored.Observed["heartbeat_auth_method"],
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "ok",
+		"node":   stored,
+	})
+}
+
 func (s *Server) manualAddNode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		NodeID string `json:"node_id"`
@@ -374,26 +826,38 @@ func (s *Server) manualAddNode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	body.URL = strings.TrimRight(body.URL, "/")
-	if body.URL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "subscriber URL is required"})
+	subscriberURL, err := normalizeEndpointURL(body.URL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": strings.Replace(err.Error(), "endpoint_url", "subscriber_url", 1)})
 		return
 	}
-	node, err := s.fetchSubscriberCapabilities(r.Context(), body.URL)
+	node, err := s.fetchSubscriberCapabilities(r.Context(), subscriberURL)
 	if err != nil {
 		node = appstate.Node{
-			NodeID:      body.NodeID,
-			DisplayName: body.NodeID,
-			URL:         body.URL,
-			Role:        "subscriber",
-			Status:      "degraded",
-			Enabled:     true,
-			Approved:    true,
-			LastSeen:    time.Now().UTC(),
+			NodeID:               body.NodeID,
+			DisplayName:          body.NodeID,
+			URL:                  subscriberURL,
+			Role:                 "subscriber",
+			Status:               "degraded",
+			Enabled:              true,
+			Approved:             false,
+			ControlLevel:         appstate.ControlLevelManaged,
+			ApprovalState:        appstate.ApprovalStatePending,
+			CapabilitySource:     appstate.CapabilitySourceSubscriberReported,
+			HealthSource:         appstate.HealthSourceSubscriberReported,
+			ModelInventorySource: appstate.ModelInventorySourceSubscriberReported,
+			BenchmarkSource:      appstate.BenchmarkSourceSubscriberReported,
+			WarmStateSupported:   true,
+			ManagementSupported:  true,
+			TelemetryLevel:       appstate.TelemetryLevelRichMetadata,
+			LastSeen:             time.Now().UTC(),
 			Observed: map[string]interface{}{
-				"enrollment_warning": "Capabilities could not be fetched: " + err.Error(),
+				"manual_add":                  true,
+				"manual_add_pending_approval": true,
+				"enrollment_warning":          "Capabilities could not be fetched: " + err.Error(),
 			},
 		}
+		applyModelLifecycleObserved(&node, modelLifecycleSourceSubscriberReported, modelLifecycleModeRich, time.Now().UTC())
 		if node.NodeID == "" {
 			node.NodeID = "manual_" + randomHex(4)
 			node.DisplayName = node.NodeID
@@ -402,20 +866,175 @@ func (s *Server) manualAddNode(w http.ResponseWriter, r *http.Request) {
 		if body.NodeID != "" {
 			node.NodeID = body.NodeID
 		}
-		node.URL = body.URL
+		node.URL = subscriberURL
 		node.Role = "subscriber"
 		node.Enabled = true
-		node.Approved = true
+		node.Approved = false
+		node.ApprovalState = appstate.ApprovalStatePending
+		node.ControlLevel = appstate.ControlLevelManaged
+		node.CapabilitySource = appstate.CapabilitySourceSubscriberReported
+		node.HealthSource = appstate.HealthSourceSubscriberReported
+		node.ModelInventorySource = appstate.ModelInventorySourceSubscriberReported
+		node.BenchmarkSource = appstate.BenchmarkSourceSubscriberReported
+		node.WarmStateSupported = true
+		node.ManagementSupported = true
+		node.TelemetryLevel = appstate.TelemetryLevelRichMetadata
+		node.Models = sanitizeModelStates(node.Models)
 		if node.Status == "" {
 			node.Status = "healthy"
 		}
+		if node.Observed == nil {
+			node.Observed = map[string]interface{}{}
+		}
+		node.Observed["manual_add"] = true
+		node.Observed["manual_add_pending_approval"] = true
+		applyModelLifecycleObserved(&node, modelLifecycleSourceSubscriberReported, modelLifecycleModeRich, time.Now().UTC())
 	}
 	if err := s.store.UpsertNode(node); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.tele.Emit("node_enrollment", telemetry.Event{"node_id": node.NodeID, "url": body.URL, "status": node.Status})
-	writeJSON(w, http.StatusOK, node)
+	stored := s.store.Snapshot().Nodes[node.NodeID]
+	s.tele.Emit("node_enrollment", telemetry.Event{
+		"node_id":           stored.NodeID,
+		"status":            stored.Status,
+		"control_level":     stored.ControlLevel,
+		"trust_level":       stored.TrustLevel,
+		"approval_state":    stored.ApprovalState,
+		"capability_source": stored.CapabilitySource,
+		"manual_add":        true,
+	})
+	writeJSON(w, http.StatusOK, stored)
+}
+
+func (s *Server) passiveAddNode(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		NodeID      string `json:"node_id"`
+		DisplayName string `json:"display_name"`
+		EndpointURL string `json:"endpoint_url"`
+		TrustLevel  string `json:"trust_level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	endpointURL, err := normalizeEndpointURL(body.EndpointURL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	trustLevel := strings.TrimSpace(body.TrustLevel)
+	if !validTrustLevel(trustLevel) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "explicit trust_level is required"})
+		return
+	}
+	models, err := s.fetchPassiveEndpointModels(r.Context(), endpointURL)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":   "passive_endpoint_validation_failed",
+			"message": "Could not validate the Ollama-compatible endpoint with /api/tags.",
+		})
+		return
+	}
+	now := time.Now().UTC()
+	nodeID := strings.TrimSpace(body.NodeID)
+	if nodeID == "" {
+		nodeID = "passive_" + randomHex(4)
+	}
+	displayName := strings.TrimSpace(body.DisplayName)
+	if displayName == "" {
+		displayName = nodeID
+	}
+	node := appstate.Node{
+		NodeID:               nodeID,
+		DisplayName:          displayName,
+		URL:                  endpointURL,
+		Role:                 "passive",
+		ControlLevel:         appstate.ControlLevelPassive,
+		TrustLevel:           trustLevel,
+		CapabilitySource:     appstate.CapabilitySourceMarshalObserved,
+		ApprovalState:        appstate.ApprovalStatePending,
+		HealthSource:         appstate.HealthSourceMarshalObserved,
+		ModelInventorySource: appstate.ModelInventorySourceMarshalObserved,
+		BenchmarkSource:      appstate.BenchmarkSourceNone,
+		TelemetryLevel:       appstate.TelemetryLevelMarshalObservedMetadata,
+		Models:               models,
+		Status:               "healthy",
+		Enabled:              true,
+		Approved:             false,
+		OllamaAvailable:      true,
+		LastSeen:             now,
+		LastObservedAt:       &now,
+		Observed: map[string]interface{}{
+			"validation":        "api_tags",
+			"model_count":       len(models),
+			"limitations":       "passive_endpoint",
+			"validation_status": "ok",
+		},
+	}
+	applyModelLifecycleObserved(&node, modelLifecycleSourceMarshalObserved, modelLifecycleModeInventoryOnly, now)
+	if err := s.store.UpsertNode(node); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	stored := s.store.Snapshot().Nodes[node.NodeID]
+	s.tele.Emit("node_enrollment", telemetry.Event{
+		"node_id":           stored.NodeID,
+		"status":            stored.Status,
+		"control_level":     stored.ControlLevel,
+		"trust_level":       stored.TrustLevel,
+		"capability_source": stored.CapabilitySource,
+	})
+	writeJSON(w, http.StatusOK, stored)
+}
+
+func normalizeEndpointURL(raw string) (string, error) {
+	raw = strings.TrimSpace(strings.TrimRight(raw, "/"))
+	if raw == "" {
+		return "", fmt.Errorf("endpoint_url is required")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("endpoint_url must be an absolute HTTP or HTTPS URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("endpoint_url must use http or https")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("endpoint_url must not include credentials")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func validTrustLevel(level string) bool {
+	switch level {
+	case appstate.TrustLevelLocal, appstate.TrustLevelLANTrusted, appstate.TrustLevelLANUnverified, appstate.TrustLevelExternal:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) fetchPassiveEndpointModels(ctx context.Context, endpointURL string) ([]appstate.ModelState, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	client := ollama.New(endpointURL)
+	client.HTTP = s.client
+	tags, err := client.Tags(ctx)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]appstate.ModelState, 0, len(tags.Models))
+	for _, model := range tags.Models {
+		if model.Name == "" {
+			continue
+		}
+		models = append(models, appstate.ModelState{Name: model.Name, State: "installed"})
+	}
+	return sanitizeModelStates(models), nil
 }
 
 func (s *Server) fetchSubscriberCapabilities(ctx context.Context, baseURL string) (appstate.Node, error) {
@@ -434,7 +1053,11 @@ func (s *Server) fetchSubscriberCapabilities(ctx context.Context, baseURL string
 	if resp.StatusCode >= 400 {
 		return node, fmt.Errorf("subscriber returned %s", resp.Status)
 	}
-	return node, json.NewDecoder(resp.Body).Decode(&node)
+	if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
+		return node, err
+	}
+	node.Models = sanitizeModelStates(node.Models)
+	return node, nil
 }
 
 func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
@@ -450,14 +1073,206 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "approve":
+		node.ApprovalState = appstate.ApprovalStateApproved
+		node.Approved = true
+		node.Enabled = true
+		if node.Status == "" || node.Status == "disabled" || node.Status == "revoked" || node.Status == "rejected" {
+			node.Status = "healthy"
+		}
 	case "benchmark":
-		node.Observed = map[string]interface{}{"benchmark_status": "queued", "updated_at": time.Now().UTC()}
+		var jobReq benchmarkJobRequest
+		if err := json.NewDecoder(r.Body).Decode(&jobReq); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid benchmark job request"})
+			return
+		}
+		policy := benchmarkPolicyForNode(node, time.Now().UTC())
+		if !policy.Eligible {
+			s.tele.Emit("benchmark_policy_rejected", telemetry.Event{
+				"node_id":          node.NodeID,
+				"control_level":    policy.ControlLevel,
+				"trust_level":      policy.TrustLevel,
+				"approval_state":   policy.ApprovalState,
+				"benchmark_source": policy.BenchmarkSource,
+				"mode":             policy.Mode,
+				"reason_codes":     policy.ReasonCodes,
+			})
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":        "benchmark_policy_rejected",
+				"message":      policy.Message,
+				"reason_codes": policy.ReasonCodes,
+			})
+			return
+		}
+		workloadSuite, ok, workloadReason := benchmarkWorkloadSuiteJobMetadata(jobReq)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":        "benchmark_workload_suite_rejected",
+				"message":      "Benchmark workload suite selection is invalid or missing required local fixture metadata.",
+				"reason_codes": []string{workloadReason},
+			})
+			return
+		}
+		job := createManagedBenchmarkJob(&node, policy, workloadSuite, s.benchmarkSchedulerConfig())
+		s.tele.Emit("benchmark_policy_queued", telemetry.Event{
+			"node_id":          node.NodeID,
+			"control_level":    policy.ControlLevel,
+			"trust_level":      policy.TrustLevel,
+			"approval_state":   policy.ApprovalState,
+			"benchmark_source": appstate.BenchmarkSourceSubscriberReported,
+			"benchmark_id":     job["benchmark_id"],
+			"mode":             policy.Mode,
+			"workload_suite":   workloadSuite["suite_id"],
+			"workload_source":  workloadSuite["source"],
+			"reason_codes":     policy.ReasonCodes,
+		})
+		if err := s.store.UpsertNode(node); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		stored := s.store.Snapshot().Nodes[node.NodeID]
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "queued", "node": stored, "job": job})
+		return
+	case "benchmark-probe":
+		if routingStatusControlLevel(node) != appstate.ControlLevelPassive {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "benchmark probes are only supported for passive endpoints"})
+			return
+		}
+		updated, result, err := s.runPassiveBenchmarkProbe(node)
+		if err := s.store.UpsertNode(updated); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		stored := s.store.Snapshot().Nodes[updated.NodeID]
+		s.tele.Emit("benchmark_probe_completed", telemetry.Event{
+			"node_id":          stored.NodeID,
+			"control_level":    stored.ControlLevel,
+			"trust_level":      stored.TrustLevel,
+			"approval_state":   stored.ApprovalState,
+			"benchmark_source": appstate.BenchmarkSourceMarshalObserved,
+			"benchmark_status": result["status"],
+			"model_count":      result["model_count"],
+		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "probe_failed", "node": stored, "result": result})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "node": stored, "result": result})
+		return
+	case "model-actions":
+		if len(parts) != 3 || parts[2] != "keep-warm" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown node action"})
+			return
+		}
+		var actionReq modelKeepWarmActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&actionReq); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid model action request"})
+			return
+		}
+		action, policy, ok := createModelKeepWarmAction(&node, actionReq, time.Now().UTC())
+		if !ok {
+			s.tele.Emit("model_lifecycle_action_rejected", telemetry.Event{
+				"node_id":        node.NodeID,
+				"control_level":  policy.ControlLevel,
+				"trust_level":    policy.TrustLevel,
+				"approval_state": policy.ApprovalState,
+				"action_type":    modelLifecycleActionKeepWarm,
+				"reason_codes":   policy.ReasonCodes,
+			})
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":        "model_lifecycle_action_rejected",
+				"message":      policy.Message,
+				"reason_codes": policy.ReasonCodes,
+			})
+			return
+		}
+		if err := s.store.UpsertNode(node); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		stored := s.store.Snapshot().Nodes[node.NodeID]
+		s.tele.Emit("model_lifecycle_action_queued", telemetry.Event{
+			"node_id":           stored.NodeID,
+			"control_level":     stored.ControlLevel,
+			"trust_level":       stored.TrustLevel,
+			"approval_state":    stored.ApprovalState,
+			"action_id":         action["action_id"],
+			"action_type":       action["action_type"],
+			"model":             action["model"],
+			"desired_keep_warm": action["desired_keep_warm"],
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "queued", "node": stored, "action": action})
+		return
+	case "heartbeat-credential":
+		if len(parts) != 3 || parts[2] != "rotate" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown node action"})
+			return
+		}
+		if node.ControlLevel != "" && node.ControlLevel != appstate.ControlLevelManaged {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "heartbeat credentials are only supported for managed nodes"})
+			return
+		}
+		var credential string
+		var err error
+		node, credential, err = s.rotateSubscriberHeartbeatCredential(node, "admin_rotation")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.store.UpsertNode(node); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		stored := s.store.Snapshot().Nodes[node.NodeID]
+		s.tele.Emit("managed_node_heartbeat_credential_rotated", telemetry.Event{
+			"node_id":        stored.NodeID,
+			"control_level":  stored.ControlLevel,
+			"trust_level":    stored.TrustLevel,
+			"approval_state": stored.ApprovalState,
+			"token_hint":     tokenHint(credential),
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":             "rotated",
+			"node":               stored,
+			"credential":         credential,
+			"subscriber_install": buildSubscriberCredentialInstallPlan(stored, tokenHint(credential)),
+			"heartbeat_auth": map[string]string{
+				"method":                "shared_secret",
+				"header":                "X-Llama-Wrangler-Subscriber-Token",
+				"credential_derivation": "random_shared_secret_v1",
+				"token_hint":            tokenHint(credential),
+			},
+		})
+		return
 	case "disable":
 		node.Enabled = false
 		node.Status = "disabled"
 	case "enable":
 		node.Enabled = true
 		node.Status = "healthy"
+	case "revoke":
+		node.ApprovalState = appstate.ApprovalStateRevoked
+		node.Approved = false
+		node.Enabled = false
+		node.Status = "disabled"
+	case "trust":
+		var body struct {
+			TrustLevel string `json:"trust_level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		body.TrustLevel = strings.TrimSpace(body.TrustLevel)
+		if !validTrustLevel(body.TrustLevel) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid trust_level is required"})
+			return
+		}
+		node.TrustLevel = body.TrustLevel
+		if node.Observed == nil {
+			node.Observed = map[string]interface{}{}
+		}
+		node.Observed["trust_updated_at"] = time.Now().UTC()
 	case "overrides":
 		var patch appstate.Node
 		_ = json.NewDecoder(r.Body).Decode(&patch)
@@ -475,7 +1290,26 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.UpsertNode(node)
-	writeJSON(w, http.StatusOK, node)
+	stored := s.store.Snapshot().Nodes[node.NodeID]
+	if parts[1] == "approve" || parts[1] == "revoke" {
+		s.store.SetEnrollmentApproval(stored.NodeID, stored.ApprovalState)
+		s.tele.Emit("node_approval", telemetry.Event{
+			"node_id":        stored.NodeID,
+			"control_level":  stored.ControlLevel,
+			"trust_level":    stored.TrustLevel,
+			"approval_state": stored.ApprovalState,
+			"status":         stored.Status,
+		})
+	}
+	if parts[1] == "trust" {
+		s.tele.Emit("node_trust_updated", telemetry.Event{
+			"node_id":        stored.NodeID,
+			"control_level":  stored.ControlLevel,
+			"trust_level":    stored.TrustLevel,
+			"approval_state": stored.ApprovalState,
+		})
+	}
+	writeJSON(w, http.StatusOK, stored)
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
@@ -582,13 +1416,114 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	state := s.store.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"nodes":           len(state.Nodes),
-		"sessions":        len(state.Sessions),
-		"queue_depth":     s.queueDepth(),
-		"queue":           s.queueSnapshot(),
-		"operation_stats": s.operationStats(),
-		"audit_count":     len(state.Audit),
+		"nodes":                          len(state.Nodes),
+		"sessions":                       len(state.Sessions),
+		"queue_depth":                    s.queueDepth(),
+		"queue":                          s.queueSnapshot(),
+		"operation_stats":                s.operationStats(),
+		"routing_policy_status":          s.routingPolicyStatus(),
+		"benchmark_policy_status":        s.benchmarkPolicyStatus(),
+		"benchmark_scheduler":            s.benchmarkSchedulerStatus(),
+		"benchmark_runner":               s.buildBenchmarkRunnerGuidance(""),
+		"benchmark_workload":             benchmarkWorkloadSuiteStatus(),
+		"model_lifecycle":                s.modelLifecycleStatus(),
+		"model_lifecycle_actions":        s.modelLifecycleActionPolicyStatus(),
+		"model_lifecycle_action_history": s.modelLifecycleActionHistoryStatus(ModelLifecycleActionHistoryFilter{Limit: modelLifecycleActionHistoryDefaultLimit}),
+		"audit_count":                    len(state.Audit),
 	})
+}
+
+func (s *Server) benchmarkSchedulerReconcile(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UTC()
+	schedulerPolicy := s.benchmarkSchedulerConfig()
+	run := s.reconcileBenchmarkJobs(now, benchmarkJobManualReconcileReason)
+	s.benchmarkBackground.recordAudit(now, benchmarkSchedulerAuditTriggerOperator, benchmarkJobManualReconcileReason, schedulerPolicy, run)
+	status := s.benchmarkSchedulerStatusAt(now)
+	s.tele.Emit("benchmark_scheduler_manual_reconcile", telemetry.Event{
+		"changed":   run.Changed,
+		"timed_out": run.TimedOut,
+		"retried":   run.Retried,
+		"exhausted": run.Exhausted,
+		"scheduler": benchmarkJobSchedulerPolicy,
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "ok",
+		"changed":   run.Changed,
+		"timed_out": run.TimedOut,
+		"retried":   run.Retried,
+		"exhausted": run.Exhausted,
+		"scheduler": status,
+	})
+}
+
+func (s *Server) benchmarkSchedulerHistory(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.benchmarkSchedulerHistoryStatus())
+}
+
+func (s *Server) benchmarkSchedulerPolicy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"config": s.benchmarkSchedulerConfig(),
+		"limits": benchmarkSchedulerPolicyLimits(),
+	})
+}
+
+func (s *Server) putBenchmarkSchedulerPolicy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy              *string `json:"policy"`
+		MaxAttempts         *int    `json:"max_attempts"`
+		LeaseTimeoutSeconds *int    `json:"lease_timeout_seconds"`
+		RetryDelaySeconds   *int    `json:"retry_delay_seconds"`
+		BackgroundEnabled   *bool   `json:"background_enabled"`
+		TickIntervalSeconds *int    `json:"tick_interval_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid benchmark scheduler policy"})
+		return
+	}
+	normalized := s.benchmarkSchedulerConfig()
+	if body.Policy != nil {
+		normalized.Policy = *body.Policy
+	}
+	if body.MaxAttempts != nil {
+		normalized.MaxAttempts = *body.MaxAttempts
+	}
+	if body.LeaseTimeoutSeconds != nil {
+		normalized.LeaseTimeoutSeconds = *body.LeaseTimeoutSeconds
+	}
+	if body.RetryDelaySeconds != nil {
+		normalized.RetryDelaySeconds = *body.RetryDelaySeconds
+	}
+	if body.BackgroundEnabled != nil {
+		normalized.BackgroundEnabled = *body.BackgroundEnabled
+	}
+	if body.TickIntervalSeconds != nil {
+		normalized.TickIntervalSeconds = *body.TickIntervalSeconds
+	}
+	normalized = config.NormalizeBenchmarkSchedulerConfig(normalized)
+	cfg := s.store.Snapshot().Config
+	cfg.Capabilities.BenchmarkScheduler = normalized
+	if err := s.store.SaveConfig(cfg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cfg = s.store.Snapshot().Config
+	s.benchmarkBackground.resetPlan(time.Now().UTC(), normalized)
+	s.tele.Emit("benchmark_scheduler_policy_updated", telemetry.Event{
+		"scheduler":             normalized.Policy,
+		"max_attempts":          normalized.MaxAttempts,
+		"lease_timeout_seconds": normalized.LeaseTimeoutSeconds,
+		"retry_delay_seconds":   normalized.RetryDelaySeconds,
+		"background_enabled":    normalized.BackgroundEnabled,
+		"tick_interval_seconds": normalized.TickIntervalSeconds,
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"config": normalized,
+		"limits": benchmarkSchedulerPolicyLimits(),
+	})
+}
+
+func (s *Server) benchmarkSchedulerConfig() config.BenchmarkSchedulerConfig {
+	return config.NormalizeBenchmarkSchedulerConfig(s.store.Snapshot().Config.Capabilities.BenchmarkScheduler)
 }
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
@@ -809,13 +1744,56 @@ func (s *Server) marshalProxy(path, surface string) http.HandlerFunc {
 		decision, ok := routing.Select(s.cfg, s.store.Snapshot(), routing.Request{Model: model, Streaming: stream, SessionID: sessionID})
 		if !ok {
 			queueStatus = queueStatusFailed
-			s.tele.Emit("error", telemetry.Event{"request_id": requestID, "error_class": "no_eligible_node", "model_requested": model, "retryable": false})
+			s.tele.Emit("error", telemetry.Event{"request_id": requestID, "error_class": "no_eligible_node", "model_requested": model, "retryable": false, "routing_reasons": decision.Reasons, "excluded_nodes": decision.ExcludedNodes, "execution_mode": decision.ExecutionMode})
 			writeInferenceError(w, r, http.StatusBadGateway, errorCodeNoEligibleNode, "No eligible Ollama node is available for the requested model.")
 			return
 		}
-		decision.SelectedNode = session.ApplyAffinity(s.store, sessionID, decision.Affinity, decision.SelectedNode, decision.ResolvedModel, requestID)
+		consensusMode := routing.IsConsensusDecision(decision)
+		if !consensusMode {
+			decision.SelectedNode = session.ApplyAffinity(s.store, sessionID, decision.Affinity, decision.SelectedNode, decision.ResolvedModel, requestID, decision.CandidateNodes)
+		}
 		s.tele.Emit("request", telemetry.Event{"request_id": requestID, "api_surface": surface, "model_requested": model, "model_alias": decision.ModelAlias, "execution_mode": decision.ExecutionMode, "stream": stream, "session_id": sessionID})
-		s.tele.Emit("routing_decision", telemetry.Event{"request_id": requestID, "model_alias": decision.ModelAlias, "resolved_model": decision.ResolvedModel, "selected_node": decision.SelectedNode, "candidate_nodes": decision.CandidateNodes, "fallback_nodes": decision.FallbackNodes, "routing_strategy": decision.Strategy, "routing_reasons": decision.Reasons, "execution_mode": decision.ExecutionMode})
+		s.tele.Emit("routing_decision", telemetry.Event{"request_id": requestID, "model_alias": decision.ModelAlias, "resolved_model": decision.ResolvedModel, "selected_node": decision.SelectedNode, "candidate_nodes": decision.CandidateNodes, "candidate_metadata": decision.CandidateMetadata, "fallback_nodes": decision.FallbackNodes, "excluded_nodes": decision.ExcludedNodes, "routing_strategy": decision.Strategy, "routing_reasons": decision.Reasons, "execution_mode": decision.ExecutionMode, "consensus_required": decision.ConsensusRequired, "consensus_limit": decision.ConsensusLimit})
+
+		if consensusMode {
+			if stream {
+				queueStatus = queueStatusFailed
+				s.tele.Emit("consensus", telemetry.Event{
+					"request_id":            requestID,
+					"execution_mode":        decision.ExecutionMode,
+					"participants":          decision.CandidateNodes,
+					"participant_count":     len(decision.CandidateNodes),
+					"successful_count":      0,
+					"failed_count":          0,
+					"consensus_reached":     false,
+					"disagreement_detected": false,
+					"streaming_rejected":    true,
+					"frontier_used":         false,
+				})
+				writeInferenceError(w, r, http.StatusBadRequest, errorCodeConsensusStreamingUnsupported, "Streaming consensus is not available in the V1 non-streaming consensus foundation.")
+				return
+			}
+			outcome := s.forwardConsensus(r.Context(), w, path, surface, body, decision, consensusDebugRequested(r, body))
+			s.tele.Emit("consensus", consensusTelemetry(decision, requestID, outcome))
+			if outcome.Err != nil {
+				queueStatus = queueStatusFailed
+				if outcome.ClientCancelled {
+					queueStatus = queueStatusCancelled
+					s.tele.Emit("request_cancelled", telemetry.Event{"request_id": requestID, "reason": "client_cancelled_during_consensus", "execution_mode": decision.ExecutionMode, "participant_count": len(outcome.Participants), "successful_count": len(outcome.SuccessfulNodes), "partial_output": false, "retry_allowed": false})
+					return
+				}
+				if outcome.ResponseCommitted {
+					queueStatus = queueStatusPartial
+					s.tele.Emit("response_partial", telemetry.Event{"request_id": requestID, "selected_node": outcome.WinnerNode, "stream": false, "bytes_written": outcome.BytesWritten, "partial_output": outcome.BytesWritten > 0, "retry_allowed": false, "retry_phase": "after_partial_output", "execution_mode": decision.ExecutionMode})
+					return
+				}
+				status, code, message := consensusInferenceFailure(outcome)
+				writeInferenceError(w, r, status, code, message)
+				return
+			}
+			s.tele.Emit("response", telemetry.Event{"request_id": requestID, "status": "success", "selected_node": outcome.WinnerNode, "resolved_model": decision.ResolvedModel, "latency_ms": time.Since(start).Milliseconds(), "fallback_used": false, "retry_count": 0, "bytes_written": outcome.BytesWritten, "frontier_used": false, "execution_mode": decision.ExecutionMode, "participant_count": len(outcome.Participants), "agreement_score": outcome.AgreementScore, "consensus_reached": outcome.ConsensusReached})
+			return
+		}
 
 		outcome := s.forwardWithFallback(r.Context(), w, requestID, path, body, decision, stream)
 		if outcome.Err != nil {
@@ -1183,6 +2161,34 @@ func randomHex(n int) string {
 		return strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return hex.EncodeToString(buf)
+}
+
+func enrollmentTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func subscriberHeartbeatSecretKey(nodeID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(nodeID)))
+	return "subscriber_heartbeat:" + hex.EncodeToString(sum[:])
+}
+
+func deriveSubscriberHeartbeatCredential(enrollmentToken, nodeID string) string {
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(enrollmentToken)))
+	_, _ = mac.Write([]byte("llama-wrangler.subscriber-heartbeat.v1:"))
+	_, _ = mac.Write([]byte(strings.TrimSpace(nodeID)))
+	return "lw_hb_" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func subscriberHeartbeatToken(r *http.Request) string {
+	if token := strings.TrimSpace(r.Header.Get("X-Llama-Wrangler-Subscriber-Token")); token != "" {
+		return token
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return ""
 }
 
 func max(a, b int) int {

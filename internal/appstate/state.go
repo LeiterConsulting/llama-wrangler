@@ -159,7 +159,10 @@ type EnrollmentRequest struct {
 	CapabilitySource string    `json:"capability_source,omitempty"`
 	ApprovalState    string    `json:"approval_state,omitempty"`
 	TokenHash        string    `json:"token_hash,omitempty"`
+	TokenHint        string    `json:"token_hint,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
+	RegisteredAt     time.Time `json:"registered_at,omitempty"`
 }
 
 type AuditEvent struct {
@@ -361,6 +364,102 @@ func (s *Store) UpsertNode(node Node) error {
 	return s.saveLocked()
 }
 
+func (s *Store) AddEnrollmentRequest(req EnrollmentRequest) (EnrollmentRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if req.NodeID == "" {
+		req.NodeID = "enroll_" + randomHex(4)
+	}
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = now
+	} else {
+		req.CreatedAt = req.CreatedAt.UTC()
+	}
+	if !req.ExpiresAt.IsZero() {
+		req.ExpiresAt = req.ExpiresAt.UTC()
+	}
+	req = normalizeEnrollmentRequest(req)
+	replaced := false
+	for i := range s.state.EnrollmentQueue {
+		if sameEnrollmentRequest(s.state.EnrollmentQueue[i], req) {
+			s.state.EnrollmentQueue[i] = req
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.state.EnrollmentQueue = append([]EnrollmentRequest{req}, s.state.EnrollmentQueue...)
+	}
+	s.state.UpdatedAt = now
+	return req, s.saveLocked()
+}
+
+func (s *Store) RegisterEnrollmentNode(tokenHash string, node Node, req EnrollmentRequest, now time.Time) (EnrollmentRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now = now.UTC()
+	for i := range s.state.EnrollmentQueue {
+		queued := normalizeEnrollmentRequest(s.state.EnrollmentQueue[i])
+		if queued.TokenHash == "" || queued.TokenHash != tokenHash {
+			continue
+		}
+		if !queued.ExpiresAt.IsZero() && now.After(queued.ExpiresAt) {
+			return EnrollmentRequest{}, fmt.Errorf("enrollment token expired")
+		}
+		if node.NodeID == "" {
+			node.NodeID = queued.NodeID
+		}
+		if node.URL == "" {
+			node.URL = queued.URL
+		}
+		if node.Hostname == "" {
+			node.Hostname = req.Hostname
+		}
+		node.ControlLevel = ControlLevelManaged
+		if node.TrustLevel == "" {
+			node.TrustLevel = queued.TrustLevel
+		}
+		node.CapabilitySource = CapabilitySourceSubscriberReported
+		node.ApprovalState = ApprovalStatePending
+		node.Approved = false
+		node.Enabled = true
+		node = normalizeNode(node)
+
+		queued.NodeID = node.NodeID
+		queued.URL = node.URL
+		if req.Hostname != "" {
+			queued.Hostname = req.Hostname
+		} else if node.Hostname != "" {
+			queued.Hostname = node.Hostname
+		}
+		queued.ControlLevel = ControlLevelManaged
+		queued.TrustLevel = node.TrustLevel
+		queued.CapabilitySource = CapabilitySourceSubscriberReported
+		queued.ApprovalState = ApprovalStatePending
+		queued.TokenHash = ""
+		queued.RegisteredAt = now
+		s.state.EnrollmentQueue[i] = queued
+		s.state.Nodes[node.NodeID] = node
+		s.state.UpdatedAt = now
+		return queued, s.saveLocked()
+	}
+	return EnrollmentRequest{}, fmt.Errorf("valid enrollment token not found")
+}
+
+func (s *Store) SetEnrollmentApproval(nodeID, approvalState string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.EnrollmentQueue {
+		if s.state.EnrollmentQueue[i].NodeID == nodeID {
+			s.state.EnrollmentQueue[i].ApprovalState = approvalState
+			s.state.UpdatedAt = time.Now().UTC()
+			_ = s.saveLocked()
+			return
+		}
+	}
+}
+
 func (s *Store) SetSetupComplete(complete bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -528,20 +627,41 @@ func ensureEnrollmentQueue(queue []EnrollmentRequest) []EnrollmentRequest {
 func normalizeEnrollmentQueue(queue []EnrollmentRequest) []EnrollmentRequest {
 	queue = ensureEnrollmentQueue(queue)
 	for i := range queue {
-		if queue[i].ControlLevel == "" {
-			queue[i].ControlLevel = ControlLevelManaged
-		}
-		if queue[i].TrustLevel == "" {
-			queue[i].TrustLevel = trustLevelForEndpoint(queue[i].URL, false)
-		}
-		if queue[i].CapabilitySource == "" {
-			queue[i].CapabilitySource = CapabilitySourceSubscriberReported
-		}
-		if queue[i].ApprovalState == "" {
-			queue[i].ApprovalState = ApprovalStatePending
-		}
+		queue[i] = normalizeEnrollmentRequest(queue[i])
 	}
 	return queue
+}
+
+func normalizeEnrollmentRequest(req EnrollmentRequest) EnrollmentRequest {
+	if req.ControlLevel == "" {
+		req.ControlLevel = ControlLevelManaged
+	}
+	if req.TrustLevel == "" {
+		req.TrustLevel = trustLevelForEndpoint(req.URL, false)
+	}
+	if req.CapabilitySource == "" {
+		req.CapabilitySource = CapabilitySourceSubscriberReported
+	}
+	if req.ApprovalState == "" {
+		req.ApprovalState = ApprovalStatePending
+	}
+	if !req.CreatedAt.IsZero() {
+		req.CreatedAt = req.CreatedAt.UTC()
+	}
+	if !req.ExpiresAt.IsZero() {
+		req.ExpiresAt = req.ExpiresAt.UTC()
+	}
+	if !req.RegisteredAt.IsZero() {
+		req.RegisteredAt = req.RegisteredAt.UTC()
+	}
+	return req
+}
+
+func sameEnrollmentRequest(a, b EnrollmentRequest) bool {
+	if a.TokenHash != "" && b.TokenHash != "" && a.TokenHash == b.TokenHash {
+		return true
+	}
+	return a.NodeID != "" && a.NodeID == b.NodeID
 }
 
 func normalizeNode(node Node) Node {
@@ -565,8 +685,17 @@ func normalizeNode(node Node) Node {
 			node.ApprovalState = ApprovalStatePending
 		}
 	}
-	if node.ApprovalState == ApprovalStateApproved {
+	switch node.ApprovalState {
+	case ApprovalStateApproved:
 		node.Approved = true
+	case ApprovalStatePending, ApprovalStateRejected, ApprovalStateRevoked:
+		node.Approved = false
+	default:
+		if node.Approved {
+			node.ApprovalState = ApprovalStateApproved
+		} else {
+			node.ApprovalState = ApprovalStatePending
+		}
 	}
 	if node.ControlLevel == ControlLevelPassive {
 		if node.CapabilitySource == "" {

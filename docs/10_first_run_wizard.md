@@ -5,7 +5,7 @@ The embedded setup wizard is the primary configuration surface. It supports:
 - local system scan
 - Ollama detection
 - role recommendation
-- manual peer enrollment placeholder
+- safe mDNS/Bonjour peer discovery with manual adoption
 - manual subscriber enrollment by URL
 - model inventory
 - routing profile generation
@@ -23,6 +23,8 @@ The embedded setup wizard is the primary configuration surface. It supports:
 - client preset snippets use API-key placeholders in API responses and browser-local substitution only after a one-time key is generated
 - explicit LAN exposure warning when the listen address is not localhost or loopback
 - auth failure rate-limit metadata in Settings
+
+Peer discovery is operator-initiated only. It returns review-only candidates from mDNS/Bonjour metadata and does not persist, approve, or route to discovered services. Subnet scanning remains disabled unless a future explicit opt-in workflow is added.
 
 The wizard applies these defaults when the user selects recommended setup:
 

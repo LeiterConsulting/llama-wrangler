@@ -7,13 +7,15 @@ import (
 )
 
 const (
-	errorCodeAdminAuthRequired     = "admin_auth_required"
-	errorCodeClientKeyRequired     = "client_api_key_required"
-	errorCodeClientAuthRateLimited = "client_auth_rate_limited"
-	errorCodeNoEligibleNode        = "no_eligible_node"
-	errorCodeQueueFull             = "queue_full"
-	errorCodeUpstreamUnavailable   = "upstream_unavailable"
-	errorCodeProxyTargetRequired   = "proxy_target_required"
+	errorCodeAdminAuthRequired              = "admin_auth_required"
+	errorCodeClientKeyRequired              = "client_api_key_required"
+	errorCodeClientAuthRateLimited          = "client_auth_rate_limited"
+	errorCodeNoEligibleNode                 = "no_eligible_node"
+	errorCodeQueueFull                      = "queue_full"
+	errorCodeUpstreamUnavailable            = "upstream_unavailable"
+	errorCodeConsensusStreamingUnsupported  = "consensus_streaming_not_supported"
+	errorCodeConsensusInsufficientSuccesses = "consensus_insufficient_successful_participants"
+	errorCodeProxyTargetRequired            = "proxy_target_required"
 )
 
 type openAIErrorResponse struct {

@@ -77,4 +77,36 @@
       </table>
     </panel>
   </row>
+  <row>
+    <panel>
+      <title>Consensus Participant Failures</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_consensus` | stats sum(failed_count) as failed_participants | fillnull value=0 failed_participants</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Peak Queue Depth</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_queue` | stats max(queue_depth) as peak_queue_depth | fillnull value=0 peak_queue_depth</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Streaming Outcome Events</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_streaming_outcomes` | stats count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+  </row>
 </form>

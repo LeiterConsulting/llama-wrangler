@@ -17,11 +17,18 @@ ollama:
 registration:
   marshal_url: "http://m4-mini.local:11435"
   interval_seconds: 30
+  heartbeat_credential_env: LLAMA_WRANGLER_SUBSCRIBER_HEARTBEAT_CREDENTIAL
 
 capabilities:
   auto_detect: true
   benchmark_on_start: true
   benchmark_interval_minutes: 1440
+  benchmark_runner:
+    enabled: false
+    mode: dry_run_v1
+    poll_interval_seconds: 60
+    max_jobs_per_tick: 1
+    result_body_policy: metrics_only
 
 limits:
   max_concurrent_jobs: 2

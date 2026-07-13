@@ -131,15 +131,63 @@ type OllamaConfig struct {
 }
 
 type RegistrationConfig struct {
-	MarshalURL      string `json:"marshal_url" yaml:"marshal_url"`
-	IntervalSeconds int    `json:"interval_seconds" yaml:"interval_seconds"`
-	EnrollmentToken string `json:"-" yaml:"enrollment_token"`
+	MarshalURL             string `json:"marshal_url" yaml:"marshal_url"`
+	IntervalSeconds        int    `json:"interval_seconds" yaml:"interval_seconds"`
+	EnrollmentToken        string `json:"-" yaml:"enrollment_token"`
+	HeartbeatCredential    string `json:"-" yaml:"heartbeat_credential"`
+	HeartbeatCredentialEnv string `json:"heartbeat_credential_env" yaml:"heartbeat_credential_env"`
 }
 
 type CapabilitiesConfig struct {
-	AutoDetect               bool `json:"auto_detect" yaml:"auto_detect"`
-	BenchmarkOnStart         bool `json:"benchmark_on_start" yaml:"benchmark_on_start"`
-	BenchmarkIntervalMinutes int  `json:"benchmark_interval_minutes" yaml:"benchmark_interval_minutes"`
+	AutoDetect               bool                     `json:"auto_detect" yaml:"auto_detect"`
+	BenchmarkOnStart         bool                     `json:"benchmark_on_start" yaml:"benchmark_on_start"`
+	BenchmarkIntervalMinutes int                      `json:"benchmark_interval_minutes" yaml:"benchmark_interval_minutes"`
+	BenchmarkScheduler       BenchmarkSchedulerConfig `json:"benchmark_scheduler" yaml:"benchmark_scheduler"`
+	BenchmarkRunner          BenchmarkRunnerConfig    `json:"benchmark_runner" yaml:"benchmark_runner"`
+}
+
+const (
+	BenchmarkSchedulerPolicyBoundedRetryTimeout = "bounded_retry_timeout_v1"
+	BenchmarkRunnerModeDryRun                   = "dry_run_v1"
+	BenchmarkRunnerModeSyntheticBuiltin         = "synthetic_builtin_v1"
+	BenchmarkRunnerResultPolicyMetricsOnly      = "metrics_only"
+
+	BenchmarkSchedulerDefaultMaxAttempts         = 3
+	BenchmarkSchedulerDefaultLeaseTimeoutSeconds = 600
+	BenchmarkSchedulerDefaultRetryDelaySeconds   = 60
+	BenchmarkSchedulerDefaultTickIntervalSeconds = 60
+	BenchmarkRunnerDefaultPollIntervalSeconds    = 60
+	BenchmarkRunnerDefaultMaxJobsPerTick         = 1
+
+	BenchmarkSchedulerMinMaxAttempts         = 1
+	BenchmarkSchedulerMaxMaxAttempts         = 10
+	BenchmarkSchedulerMinLeaseTimeoutSeconds = 30
+	BenchmarkSchedulerMaxLeaseTimeoutSeconds = 3600
+	BenchmarkSchedulerMinRetryDelaySeconds   = 5
+	BenchmarkSchedulerMaxRetryDelaySeconds   = 1800
+	BenchmarkSchedulerMinTickIntervalSeconds = 10
+	BenchmarkSchedulerMaxTickIntervalSeconds = 3600
+	BenchmarkRunnerMinPollIntervalSeconds    = 5
+	BenchmarkRunnerMaxPollIntervalSeconds    = 3600
+	BenchmarkRunnerMinMaxJobsPerTick         = 1
+	BenchmarkRunnerMaxMaxJobsPerTick         = 5
+)
+
+type BenchmarkSchedulerConfig struct {
+	Policy              string `json:"policy" yaml:"policy"`
+	MaxAttempts         int    `json:"max_attempts" yaml:"max_attempts"`
+	LeaseTimeoutSeconds int    `json:"lease_timeout_seconds" yaml:"lease_timeout_seconds"`
+	RetryDelaySeconds   int    `json:"retry_delay_seconds" yaml:"retry_delay_seconds"`
+	BackgroundEnabled   bool   `json:"background_enabled" yaml:"background_enabled"`
+	TickIntervalSeconds int    `json:"tick_interval_seconds" yaml:"tick_interval_seconds"`
+}
+
+type BenchmarkRunnerConfig struct {
+	Enabled             bool   `json:"enabled" yaml:"enabled"`
+	Mode                string `json:"mode" yaml:"mode"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds" yaml:"poll_interval_seconds"`
+	MaxJobsPerTick      int    `json:"max_jobs_per_tick" yaml:"max_jobs_per_tick"`
+	ResultBodyPolicy    string `json:"result_body_policy" yaml:"result_body_policy"`
 }
 
 type LimitsConfig struct {
@@ -195,12 +243,16 @@ func Default(mode string) Config {
 				Prefix:    "llama_wrangler",
 			},
 		},
-		Node:         NodeConfig{NodeID: "local"},
-		Ollama:       OllamaConfig{URL: "http://localhost:11434"},
-		Capabilities: CapabilitiesConfig{AutoDetect: true},
-		Limits:       LimitsConfig{MaxConcurrentJobs: 2, MaxContextTokens: 32768, AllowModelPull: false},
-		UI:           UIConfig{Enabled: true, RequireAuth: true},
-		Session:      SessionConfig{DefaultAffinity: "soft"},
+		Node:   NodeConfig{NodeID: "local"},
+		Ollama: OllamaConfig{URL: "http://localhost:11434"},
+		Capabilities: CapabilitiesConfig{
+			AutoDetect:         true,
+			BenchmarkScheduler: DefaultBenchmarkSchedulerConfig(),
+			BenchmarkRunner:    DefaultBenchmarkRunnerConfig(),
+		},
+		Limits:  LimitsConfig{MaxConcurrentJobs: 2, MaxContextTokens: 32768, AllowModelPull: false},
+		UI:      UIConfig{Enabled: true, RequireAuth: true},
+		Session: SessionConfig{DefaultAffinity: "soft"},
 	}
 }
 
@@ -277,6 +329,69 @@ func Normalize(cfg *Config) {
 	if cfg.UI.Enabled == false {
 		cfg.UI.Enabled = true
 	}
+	cfg.Capabilities.BenchmarkScheduler = NormalizeBenchmarkSchedulerConfig(cfg.Capabilities.BenchmarkScheduler)
+	cfg.Capabilities.BenchmarkRunner = NormalizeBenchmarkRunnerConfig(cfg.Capabilities.BenchmarkRunner)
+}
+
+func DefaultBenchmarkSchedulerConfig() BenchmarkSchedulerConfig {
+	return BenchmarkSchedulerConfig{
+		Policy:              BenchmarkSchedulerPolicyBoundedRetryTimeout,
+		MaxAttempts:         BenchmarkSchedulerDefaultMaxAttempts,
+		LeaseTimeoutSeconds: BenchmarkSchedulerDefaultLeaseTimeoutSeconds,
+		RetryDelaySeconds:   BenchmarkSchedulerDefaultRetryDelaySeconds,
+		BackgroundEnabled:   false,
+		TickIntervalSeconds: BenchmarkSchedulerDefaultTickIntervalSeconds,
+	}
+}
+
+func NormalizeBenchmarkSchedulerConfig(policy BenchmarkSchedulerConfig) BenchmarkSchedulerConfig {
+	defaults := DefaultBenchmarkSchedulerConfig()
+	if policy.Policy != BenchmarkSchedulerPolicyBoundedRetryTimeout {
+		policy.Policy = defaults.Policy
+	}
+	policy.MaxAttempts = boundedInt(policy.MaxAttempts, defaults.MaxAttempts, BenchmarkSchedulerMinMaxAttempts, BenchmarkSchedulerMaxMaxAttempts)
+	policy.LeaseTimeoutSeconds = boundedInt(policy.LeaseTimeoutSeconds, defaults.LeaseTimeoutSeconds, BenchmarkSchedulerMinLeaseTimeoutSeconds, BenchmarkSchedulerMaxLeaseTimeoutSeconds)
+	policy.RetryDelaySeconds = boundedInt(policy.RetryDelaySeconds, defaults.RetryDelaySeconds, BenchmarkSchedulerMinRetryDelaySeconds, BenchmarkSchedulerMaxRetryDelaySeconds)
+	policy.TickIntervalSeconds = boundedInt(policy.TickIntervalSeconds, defaults.TickIntervalSeconds, BenchmarkSchedulerMinTickIntervalSeconds, BenchmarkSchedulerMaxTickIntervalSeconds)
+	return policy
+}
+
+func DefaultBenchmarkRunnerConfig() BenchmarkRunnerConfig {
+	return BenchmarkRunnerConfig{
+		Enabled:             false,
+		Mode:                BenchmarkRunnerModeDryRun,
+		PollIntervalSeconds: BenchmarkRunnerDefaultPollIntervalSeconds,
+		MaxJobsPerTick:      BenchmarkRunnerDefaultMaxJobsPerTick,
+		ResultBodyPolicy:    BenchmarkRunnerResultPolicyMetricsOnly,
+	}
+}
+
+func NormalizeBenchmarkRunnerConfig(runner BenchmarkRunnerConfig) BenchmarkRunnerConfig {
+	defaults := DefaultBenchmarkRunnerConfig()
+	switch runner.Mode {
+	case BenchmarkRunnerModeDryRun, BenchmarkRunnerModeSyntheticBuiltin:
+	default:
+		runner.Mode = defaults.Mode
+	}
+	runner.PollIntervalSeconds = boundedInt(runner.PollIntervalSeconds, defaults.PollIntervalSeconds, BenchmarkRunnerMinPollIntervalSeconds, BenchmarkRunnerMaxPollIntervalSeconds)
+	runner.MaxJobsPerTick = boundedInt(runner.MaxJobsPerTick, defaults.MaxJobsPerTick, BenchmarkRunnerMinMaxJobsPerTick, BenchmarkRunnerMaxMaxJobsPerTick)
+	if runner.ResultBodyPolicy != BenchmarkRunnerResultPolicyMetricsOnly {
+		runner.ResultBodyPolicy = defaults.ResultBodyPolicy
+	}
+	return runner
+}
+
+func boundedInt(value int, fallback int, min int, max int) int {
+	if value <= 0 {
+		value = fallback
+	}
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func resolveEnv(cfg *Config) {
@@ -287,5 +402,8 @@ func resolveEnv(cfg *Config) {
 	}
 	if cfg.Telemetry.SplunkHEC.Token == "" && cfg.Telemetry.SplunkHEC.TokenEnv != "" {
 		cfg.Telemetry.SplunkHEC.Token = os.Getenv(cfg.Telemetry.SplunkHEC.TokenEnv)
+	}
+	if cfg.Registration.HeartbeatCredential == "" && cfg.Registration.HeartbeatCredentialEnv != "" {
+		cfg.Registration.HeartbeatCredential = os.Getenv(cfg.Registration.HeartbeatCredentialEnv)
 	}
 }

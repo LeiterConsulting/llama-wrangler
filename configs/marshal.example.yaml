@@ -26,6 +26,16 @@ routing:
     normal: 2
     low: 1
 
+capabilities:
+  auto_detect: true
+  benchmark_scheduler:
+    policy: bounded_retry_timeout_v1
+    max_attempts: 3
+    lease_timeout_seconds: 600
+    retry_delay_seconds: 60
+    background_enabled: false
+    tick_interval_seconds: 60
+
 model_aliases:
   local-fast:
     strategy: fastest_available
@@ -41,6 +51,7 @@ model_aliases:
 
   local-code-consensus:
     strategy: consensus_delta
+    execution_mode: consensus_delta
     candidates:
       - qwen3-coder:30b
       - qwen2.5-coder:14b

@@ -102,6 +102,20 @@ button.danger {
   border-color: #b91c1c;
 }
 
+button.mini {
+  margin-left: 6px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -151,6 +165,10 @@ button.danger {
   background: #fff7ed;
   color: #7c2d12;
   padding: 10px 12px;
+}
+
+.warning:empty {
+  display: none;
 }
 
 .row {
@@ -214,6 +232,26 @@ button.danger {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.warning-list {
+  display: grid;
+  gap: 10px;
+}
+
+.warning-item {
+  border-top: 1px solid #edf1f3;
+  padding: 10px 0 0;
+}
+
+.warning-item strong,
+.warning-item span {
+  display: block;
+}
+
+.warning-item > div > span {
+  color: #52636d;
+  margin-top: 4px;
 }
 
 .preset-grid {

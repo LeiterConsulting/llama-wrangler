@@ -92,6 +92,36 @@ Recommended sourcetypes:
 - Average latency by client
 - Failures by client
 
+## Implemented V1 dashboards
+
+### Llama Wrangler Overview
+
+The packaged overview retains request, latency, execution-mode, node-health, and frontier summaries and adds compact metadata-only signals for consensus participant failures, peak queue depth, and streaming outcome events.
+
+### Llama Wrangler Operations
+
+The packaged operations dashboard includes:
+
+- consensus run/failure totals, the eight fixed participant failure reasons over time, and recent safe outcome metadata
+- queue depth by priority plus scheduling policy/priority/status summaries
+- streaming retry, partial-response, and cancellation trends plus recent safe outcome rows
+- benchmark job/scheduler reconciliation history and subscriber runner tick history
+- routing policy exclusion reason distributions derived from `routing_decision.excluded_nodes` control/trust/capability-source metadata
+- recent routing decisions with alias, strategy, selected node, execution mode, and consensus bounds
+- model lifecycle action event trends and safe queue/claim/status/rejection history
+
+Both dashboards share a time-range input and are exposed through packaged app navigation. The Operations dashboard uses reusable macros so index changes can remain localized to `llama_wrangler_index`.
+
+## Knowledge objects
+
+V1 packages macros and eventtypes for consensus, queue, streaming outcomes, benchmark scheduler, benchmark runner, routing, and model lifecycle actions. `props.conf` assigns event categories to each operational sourcetype. Disabled-by-default saved reports provide the same summary/history searches without imposing scheduling load on installation.
+
+## Metadata-only contract
+
+Operational Splunk searches may use request/node/action/job IDs, model and alias names, control/trust/approval metadata, fixed reason/error codes, status, timestamps, durations, counts, queue depth/capacity/priority/policy, participant counts, agreement score, scheduler state, runner mode, and result policy metadata. They must not query or derive inference content, extracted content, raw request/response material, raw headers, authorization data, secret values, local fixture contents or full paths, comparison signatures, validator/evaluator input, or arbitrary payload fields.
+
+Consensus participant failure panels are limited to `missing_proxy_url`, `connection_error`, `upstream_4xx`, `upstream_5xx`, `body_read_failure`, `response_size_limit`, `timeout`, and `cancellation`.
+
 ## Field strategy
 
-Use indexed JSON and search-time extractions. Keep event payloads flat where possible, but allow nested fields for candidates, participants, benchmark reports, and frontier policy.
+Use indexed JSON and search-time extractions. Keep event metadata flat where possible, but allow nested metadata for candidates, participant failures, benchmark reports, and frontier policy. Routing exclusion panels use `spath` only on the safe `excluded_nodes` metadata array.

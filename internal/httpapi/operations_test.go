@@ -19,9 +19,12 @@ func TestSummarizeOperationsCountsRetryPartialAndCancellationEvents(t *testing.T
 		{Timestamp: base.Add(4 * time.Minute), Type: "request_cancelled", Fields: map[string]interface{}{"reason": "client_cancelled_after_partial_output"}},
 		{Timestamp: base.Add(5 * time.Minute), Type: "request_cancelled", Fields: map[string]interface{}{"reason": "client_disconnect_before_queue"}},
 		{Timestamp: base.Add(6 * time.Minute), Type: "response"},
+		{Timestamp: base.Add(7 * time.Minute), Type: "consensus", Fields: map[string]interface{}{"consensus_reached": true, "participant_count": 3, "successful_count": 3, "required_participants": 2, "agreement_score": 0.67, "winner_node": "managed-a", "failure_reason_counts": map[string]interface{}{"upstream_5xx": 1, "SECRET_RESPONSE": 99}}},
+		{Timestamp: base.Add(8 * time.Minute), Type: "consensus", Fields: map[string]interface{}{"consensus_reached": false, "participant_count": 2, "successful_count": 2, "required_participants": 2, "agreement_score": 0.5}},
+		{Timestamp: base.Add(9 * time.Minute), Type: "consensus", Fields: map[string]interface{}{"consensus_reached": false, "participant_count": 3, "successful_count": 1, "required_participants": 2, "timed_out": true, "failure_reason_counts": map[string]interface{}{"timeout": 2}}},
 	})
 
-	if stats.Window != "recent_audit_events" || stats.AuditEvents != 6 {
+	if stats.Window != "recent_audit_events" || stats.AuditEvents != 9 {
 		t.Fatalf("stats window/audit count = %+v", stats)
 	}
 	if stats.Retries.Total != 1 || stats.Retries.BeforeFirstToken != 1 {
@@ -36,6 +39,12 @@ func TestSummarizeOperationsCountsRetryPartialAndCancellationEvents(t *testing.T
 	if stats.Cancellations.LastAt == nil || !stats.Cancellations.LastAt.Equal(base.Add(5*time.Minute)) {
 		t.Fatalf("cancellation last_at = %v", stats.Cancellations.LastAt)
 	}
+	if stats.Consensus.Total != 3 || stats.Consensus.Reached != 1 || stats.Consensus.NoMajority != 1 || stats.Consensus.Failed != 1 || stats.Consensus.TimedOut != 1 || stats.Consensus.LastParticipantCount != 3 || stats.Consensus.LastSuccessfulCount != 1 {
+		t.Fatalf("consensus stats = %+v", stats.Consensus)
+	}
+	if stats.Consensus.FailureReasons[consensusFailureUpstream5xx] != 1 || stats.Consensus.FailureReasons[consensusFailureTimeout] != 2 || len(stats.Consensus.FailureReasons) != 2 {
+		t.Fatalf("consensus failure reason stats = %#v", stats.Consensus.FailureReasons)
+	}
 }
 
 func TestBootstrapAndMetricsIncludeOperationStats(t *testing.T) {
@@ -43,6 +52,7 @@ func TestBootstrapAndMetricsIncludeOperationStats(t *testing.T) {
 	server.store.AddAudit(appstate.AuditEvent{Type: "upstream_retry", RequestID: "req_retry", Fields: map[string]interface{}{"retry_phase": "before_first_token", "reason": "upstream_status_5xx"}})
 	server.store.AddAudit(appstate.AuditEvent{Type: "response_partial", RequestID: "req_partial", Fields: map[string]interface{}{"retry_phase": "after_partial_output", "bytes_written": 12}})
 	server.store.AddAudit(appstate.AuditEvent{Type: "request_cancelled", RequestID: "req_cancel", Fields: map[string]interface{}{"reason": "client_cancelled_after_partial_output", "partial_output": true}})
+	server.store.AddAudit(appstate.AuditEvent{Type: "consensus", RequestID: "req_consensus", Fields: map[string]interface{}{"consensus_reached": true, "participant_count": 3, "successful_count": 2, "required_participants": 2, "agreement_score": 0.67, "winner_node": "managed-a", "failure_reason_counts": map[string]interface{}{"connection_error": 1}}})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/wrangler/ui/bootstrap", nil)
@@ -95,6 +105,14 @@ func assertOperationStatsBody(t *testing.T, raw interface{}) {
 	cancellations := stats["cancellations"].(map[string]interface{})
 	if cancellations["total"].(float64) != 1 || cancellations["after_partial_output"].(float64) != 1 {
 		t.Fatalf("cancellation stats = %#v", cancellations)
+	}
+	consensus := stats["consensus"].(map[string]interface{})
+	if consensus["total"].(float64) != 1 || consensus["reached"].(float64) != 1 || consensus["last_participant_count"].(float64) != 3 || consensus["last_successful_count"].(float64) != 2 || consensus["last_winner_node"] != "managed-a" {
+		t.Fatalf("consensus stats = %#v", consensus)
+	}
+	failureReasons := consensus["failure_reasons"].(map[string]interface{})
+	if failureReasons[consensusFailureConnectionError].(float64) != 1 || len(failureReasons) != 1 {
+		t.Fatalf("consensus failure reasons = %#v", failureReasons)
 	}
 }
 

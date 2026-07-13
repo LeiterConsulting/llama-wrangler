@@ -3,6 +3,7 @@ package servicewrap
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -22,6 +23,7 @@ type Options struct {
 	Label           string
 	WorkingDir      string
 	LogDir          string
+	LaunchAgentsDir string
 	KeepAlive       bool
 	RunAtLoad       bool
 	LimitLoadToUser string
@@ -69,7 +71,14 @@ func normalizeOptions(opts *Options) {
 		opts.Label = "com.llama-wrangler.marshal"
 	}
 	if opts.LogDir == "" {
-		opts.LogDir = "~/Library/Logs/Llama Wrangler"
+		opts.LogDir = filepath.Join(userHomeDir(), "Library", "Logs", "Llama Wrangler")
+	} else {
+		opts.LogDir = expandUserPath(opts.LogDir)
+	}
+	if opts.LaunchAgentsDir == "" {
+		opts.LaunchAgentsDir = filepath.Join(userHomeDir(), "Library", "LaunchAgents")
+	} else {
+		opts.LaunchAgentsDir = expandUserPath(opts.LaunchAgentsDir)
 	}
 	if opts.WorkingDir == "" && opts.BinaryPath != "" {
 		opts.WorkingDir = filepath.Dir(opts.BinaryPath)
@@ -83,12 +92,16 @@ func launchdPlan(opts Options) (Plan, error) {
 	if opts.ConfigPath != "" && opts.Mode == "start" {
 		return Plan{}, fmt.Errorf("config path requires marshal, subscriber, or standalone mode")
 	}
+	if !validLaunchdLabel(opts.Label) {
+		return Plan{}, fmt.Errorf("invalid launchd label %q", opts.Label)
+	}
 	args := []string{opts.BinaryPath, opts.Mode}
 	if opts.ConfigPath != "" {
 		args = append(args, "--config", opts.ConfigPath)
 	}
 	env := map[string]string{
-		"LLAMA_WRANGLER_SERVICE_MODE": "1",
+		"LLAMA_WRANGLER_SECRET_BACKEND": "encrypted_file",
+		"LLAMA_WRANGLER_SERVICE_MODE":   "1",
 	}
 	for key, value := range opts.Environment {
 		key = strings.TrimSpace(key)
@@ -102,7 +115,7 @@ func launchdPlan(opts Options) (Plan, error) {
 		env["LLAMA_WRANGLER_SECRET_BACKEND"] = "os_keychain"
 	}
 	plist := renderLaunchdPlist(opts, args, env)
-	plistPath := fmt.Sprintf("~/Library/LaunchAgents/%s.plist", opts.Label)
+	plistPath := filepath.Join(opts.LaunchAgentsDir, opts.Label+".plist")
 	warnings := []string{
 		"Dry run only: this command does not write a plist, load launchd, start a service, or modify keychain items.",
 		"launchd may run with a different environment and keychain session than an interactive shell; verify before relying on OS keychain storage.",
@@ -139,6 +152,38 @@ func launchdPlan(opts Options) (Plan, error) {
 			"Expected metadata in service-like runs includes os_keychain_runtime=service_like and os_keychain_service_mode=true.",
 		},
 	}, nil
+}
+
+func userHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err == nil && strings.TrimSpace(home) != "" {
+		return home
+	}
+	return "~"
+}
+
+func expandUserPath(path string) string {
+	if path == "~" {
+		return userHomeDir()
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(userHomeDir(), strings.TrimPrefix(path, "~/"))
+	}
+	return path
+}
+
+func validLaunchdLabel(label string) bool {
+	if label == "" || len(label) > 128 || strings.Contains(label, "..") {
+		return false
+	}
+	for _, char := range label {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '.' || char == '-' || char == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func renderLaunchdPlist(opts Options, args []string, env map[string]string) string {

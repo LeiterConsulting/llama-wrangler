@@ -1,0 +1,205 @@
+<form version="1.1" theme="dark">
+  <label>Llama Wrangler Operations</label>
+  <description>Metadata-only consensus, queue, streaming, benchmark, routing, and model lifecycle operations.</description>
+  <fieldset submitButton="false">
+    <input type="time" token="time_range">
+      <label>Time Range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Consensus Runs</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_consensus` | stats count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Consensus Participant Failures</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_consensus` | stats sum(failed_count) as failed_participants | fillnull value=0 failed_participants</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Peak Queue Depth</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_queue` | stats max(queue_depth) as peak_queue_depth | fillnull value=0 peak_queue_depth</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Streaming Outcome Events</title>
+      <single>
+        <search>
+          <query>`llama_wrangler_streaming_outcomes` | stats count</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Consensus Participant Failure Reasons</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_consensus` | timechart span=5m sum('failure_reason_counts.missing_proxy_url') as missing_proxy_url sum('failure_reason_counts.connection_error') as connection_error sum('failure_reason_counts.upstream_4xx') as upstream_4xx sum('failure_reason_counts.upstream_5xx') as upstream_5xx sum('failure_reason_counts.body_read_failure') as body_read_failure sum('failure_reason_counts.response_size_limit') as response_size_limit sum('failure_reason_counts.timeout') as timeout sum('failure_reason_counts.cancellation') as cancellation</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent Consensus Outcomes</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_consensus` | table _time request_id execution_mode participant_count required_participants successful_count failed_count consensus_reached timed_out client_cancelled agreement_score comparison_strategy winner_node | sort - _time</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Queue Depth by Priority</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_queue` | timechart span=1m max(queue_depth) as queue_depth by priority</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Queue Scheduling Outcomes</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_queue` | stats count as events max(queue_depth) as peak_queue_depth latest(queue_capacity) as queue_capacity by scheduling_policy priority status | sort - events</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Streaming Retry, Partial, and Cancellation Events</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_streaming_outcomes` | timechart span=5m count by event_type</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Recent Streaming Outcomes</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_streaming_outcomes` | table _time request_id event_type selected_node reason retry_phase retry_allowed partial_output bytes_written stream | sort - _time</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Benchmark Scheduler History</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_benchmark_scheduler` | table _time event_type node_id benchmark_id status scheduler scheduler_state attempt max_attempts lease_timeout_seconds retry_delay_seconds background_enabled tick_interval_seconds changed timed_out retried exhausted reason error_code | sort - _time</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="count">20</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Subscriber Benchmark Runner History</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_benchmark_runner` | table _time status mode enabled result_body_policy benchmark_id suite_id task_count claimed completed failed no_job error_code poll_interval_seconds max_jobs_per_tick | sort - _time</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Routing Policy Exclusion Reasons</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_routing` | spath path=excluded_nodes{} output=excluded_node | mvexpand excluded_node | spath input=excluded_node path=control_level output=control_level | spath input=excluded_node path=trust_level output=trust_level | spath input=excluded_node path=capability_source output=capability_source | spath input=excluded_node path=reasons{} output=reason_code | mvexpand reason_code | stats count as exclusions by reason_code control_level trust_level capability_source | sort - exclusions</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Recent Routing Decisions</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_routing` | table _time request_id model_alias execution_mode selected_node routing_strategy routing_reasons consensus_required consensus_limit | sort - _time</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Model Lifecycle Action Events</title>
+      <chart>
+        <search>
+          <query>`llama_wrangler_model_lifecycle_actions` | timechart span=5m count by event_type</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Model Lifecycle Action History</title>
+      <table>
+        <search>
+          <query>`llama_wrangler_model_lifecycle_actions` | table _time event_type node_id control_level trust_level approval_state action_id action_type model desired_keep_warm status error_code reason_codes | sort - _time</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+</form>
